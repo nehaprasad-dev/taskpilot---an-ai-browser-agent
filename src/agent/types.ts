@@ -10,6 +10,7 @@ export type AgentAction =
   | { type: "navigate"; url: string; explanation: string }
   | { type: "click"; selector: string; explanation: string }
   | { type: "type"; selector: string; text: string; pressEnter?: boolean; explanation: string }
+  | { type: "fill"; selector: string; text: string; pressEnter?: boolean; explanation: string }
   | { type: "scroll"; direction: "up" | "down"; explanation: string }
   | { type: "extract"; instruction: string; explanation: string }
   | { type: "wait"; ms: number; explanation: string }
@@ -52,6 +53,7 @@ export type AgentEvent =
   | { type: "extraction"; data: unknown; label?: string }
   | { type: "retry"; attempt: number; reason: string; strategy: string }
   | { type: "approval_required"; reason: string; actionPreview?: string }
+  | { type: "step_failed"; reason: string; actionLabel: string }
   | { type: "checkpoint"; summary: string; collected: string[]; missing: string[] }
   | { type: "status"; status: AgentStatus; message?: string }
   | { type: "completed"; result: ResearchResult }
@@ -64,6 +66,7 @@ export type AgentStatus =
   | "paused"
   | "awaiting_approval"
   | "awaiting_checkpoint"
+  | "awaiting_recovery"
   | "recovering"
   | "completed"
   | "stopped"
@@ -84,4 +87,6 @@ export type AgentControlCommand =
   | "approve"
   | "reject"
   | "continue_checkpoint"
-  | "skip_step";
+  | "skip_step"
+  | "retry_step"
+  | "arm_approve_next";
