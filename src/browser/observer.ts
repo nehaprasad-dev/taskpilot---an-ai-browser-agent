@@ -23,11 +23,13 @@ export async function observePage(page: Page): Promise<PageObservation> {
     const interactiveElements = candidates
       .map((el, index) => {
         const tag = el.tagName.toLowerCase();
+        const inputType = el.getAttribute("type") || "";
         const text = (
           (el as HTMLElement).innerText ||
           el.getAttribute("aria-label") ||
           el.getAttribute("placeholder") ||
           el.getAttribute("name") ||
+          inputType ||
           ""
         )
           .replace(/\s+/g, " ")
@@ -39,15 +41,17 @@ export async function observePage(page: Page): Promise<PageObservation> {
           selector = `#${CSS.escape(el.id)}`;
         } else if (el.getAttribute("name")) {
           selector = `${tag}[name="${el.getAttribute("name")}"]`;
+        } else if (tag === "input" && inputType) {
+          selector = `input[type="${inputType}"]`;
         } else if (text) {
           selector = `text=${text.slice(0, 40)}`;
         } else {
           selector = `${tag}:nth-of-type(${index + 1})`;
         }
 
-        return { tag, text, selector };
+        return { tag: inputType ? `${tag}[type=${inputType}]` : tag, text: text || selector, selector };
       })
-      .filter((item) => item.text.length > 0);
+      .filter((item) => item.selector.length > 0);
 
     return {
       excerpt: bodyText.slice(0, 5000),
