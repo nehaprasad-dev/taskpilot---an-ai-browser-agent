@@ -2,6 +2,8 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import type {
+  AgentAction,
+  AgentControlCommand,
   AgentEvent,
   AgentStatus,
   PlanStep,
@@ -28,6 +30,7 @@ export type UiState = {
   pageTitle?: string;
   approval?: { reason: string; actionPreview?: string };
   checkpoint?: { summary: string; collected: string[]; missing: string[] };
+  recovery?: { reason: string; actionLabel: string };
   result?: ResearchResult;
   error?: string;
 };
@@ -39,6 +42,14 @@ const initialState: UiState = {
   plan: [],
   activity: [],
 };
+
+function actionDetail(action: AgentAction): string {
+  if (action.type === "fill" || action.type === "type") {
+    return action.explanation || `Filling a field with “${action.text}”`;
+  }
+  if ("explanation" in action) return action.explanation;
+  return action.type;
+}
 
 function pushActivity(list: ActivityItem[], item: Omit<ActivityItem, "id" | "ts">) {
   const nextItem = {
@@ -86,10 +97,7 @@ export function useAgentSession() {
             activity: pushActivity(prev.activity, {
               kind: "action",
               title: `Action · ${event.action.type}`,
-              detail:
-                "explanation" in event.action
-                  ? event.action.explanation
-                  : JSON.stringify(event.action),
+              detail: actionDetail(event.action),
             }),
           };
         case "action_completed":
@@ -145,6 +153,20 @@ export function useAgentSession() {
             },
             status: "awaiting_checkpoint",
           };
+        case "step_failed":
+          return {
+            ...prev,
+            recovery: {
+              reason: event.reason,
+              actionLabel: event.actionLabel,
+            },
+            status: "awaiting_recovery",
+            activity: pushActivity(prev.activity, {
+              kind: "error",
+              title: "Stuck",
+              detail: event.reason,
+            }),
+          };
         case "status":
           return {
             ...prev,
@@ -154,6 +176,8 @@ export function useAgentSession() {
               event.status === "awaiting_approval" ? prev.approval : undefined,
             checkpoint:
               event.status === "awaiting_checkpoint" ? prev.checkpoint : undefined,
+            recovery:
+              event.status === "awaiting_recovery" ? prev.recovery : undefined,
             activity: event.message
               ? pushActivity(prev.activity, {
                   kind: "status",
@@ -169,6 +193,7 @@ export function useAgentSession() {
             status: "completed",
             approval: undefined,
             checkpoint: undefined,
+            recovery: undefined,
           };
         case "error":
           return {
@@ -250,16 +275,7 @@ export function useAgentSession() {
   );
 
   const control = useCallback(
-    async (
-      command:
-        | "pause"
-        | "resume"
-        | "stop"
-        | "approve"
-        | "reject"
-        | "continue_checkpoint"
-        | "skip_step"
-    ) => {
+    async (command: AgentControlCommand) => {
       if (!state.sessionId) return;
       await fetch("/api/control", {
         method: "POST",
@@ -272,15 +288,24 @@ export function useAgentSession() {
       if (command === "continue_checkpoint") {
         setState((prev) => ({ ...prev, checkpoint: undefined }));
       }
+      if (command === "retry_step" || command === "skip_step") {
+        setState((prev) => ({ ...prev, recovery: undefined }));
+      }
     },
     [state.sessionId]
   );
 
   const isLive = useMemo(
     () =>
-      ["planning", "running", "paused", "awaiting_approval", "awaiting_checkpoint", "recovering"].includes(
-        state.status
-      ),
+      [
+        "planning",
+        "running",
+        "paused",
+        "awaiting_approval",
+        "awaiting_checkpoint",
+        "awaiting_recovery",
+        "recovering",
+      ].includes(state.status),
     [state.status]
   );
 
