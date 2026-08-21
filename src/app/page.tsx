@@ -7,6 +7,7 @@ import { BrowserPreview } from "@/components/agent/BrowserPreview";
 import { ControlBar } from "@/components/agent/ControlBar";
 import { ApprovalCard } from "@/components/agent/ApprovalCard";
 import { CheckpointCard } from "@/components/agent/CheckpointCard";
+import { RecoveryCard } from "@/components/agent/RecoveryCard";
 import { ResearchTable } from "@/components/results/ResearchTable";
 import { useAgentSession } from "@/components/agent/useAgentSession";
 
@@ -50,7 +51,7 @@ export default function HomePage() {
 
           {state.result ? <ResearchTable result={state.result} /> : null}
 
-          {(state.approval || state.checkpoint) && (
+          {(state.approval || state.checkpoint || state.recovery) && (
             <div className="overlay">
               {state.approval ? (
                 <ApprovalCard
@@ -69,6 +70,15 @@ export default function HomePage() {
                   onStop={() => control("stop")}
                 />
               ) : null}
+              {state.recovery ? (
+                <RecoveryCard
+                  reason={state.recovery.reason}
+                  actionLabel={state.recovery.actionLabel}
+                  onRetry={() => control("retry_step")}
+                  onSkip={() => control("skip_step")}
+                  onStop={() => control("stop")}
+                />
+              ) : null}
             </div>
           )}
 
@@ -78,6 +88,7 @@ export default function HomePage() {
             onPause={() => control("pause")}
             onResume={() => control("resume")}
             onStop={() => control("stop")}
+            onApproveNext={() => control("arm_approve_next")}
             onReset={reset}
           />
         </div>
