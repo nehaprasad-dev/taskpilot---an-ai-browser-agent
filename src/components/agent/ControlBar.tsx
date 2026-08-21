@@ -8,6 +8,7 @@ type Props = {
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
+  onApproveNext: () => void;
   onReset: () => void;
 };
 
@@ -18,6 +19,7 @@ const LABELS: Record<AgentStatus, string> = {
   paused: "Paused",
   awaiting_approval: "Needs approval",
   awaiting_checkpoint: "Checkpoint",
+  awaiting_recovery: "Stuck",
   recovering: "Recovering",
   completed: "Completed",
   stopped: "Stopped",
@@ -30,6 +32,7 @@ export function ControlBar({
   onPause,
   onResume,
   onStop,
+  onApproveNext,
   onReset,
 }: Props) {
   return (
@@ -48,11 +51,19 @@ export function ControlBar({
             type="button"
             className="btn"
             onClick={onPause}
-            disabled={!isLive || status === "awaiting_approval"}
+            disabled={!isLive || status === "awaiting_approval" || status === "awaiting_recovery"}
           >
             Pause
           </button>
         )}
+        <button
+          type="button"
+          className="btn"
+          onClick={onApproveNext}
+          disabled={!isLive || status !== "running"}
+        >
+          Approve next action
+        </button>
         <button
           type="button"
           className="btn btn-danger"
