@@ -10,8 +10,9 @@ import type {
   ResearchResult,
 } from "@/agent/types";
 import { createSessionContext } from "@/browser/browser";
-import { executeAction, findAlternativeClickTarget } from "@/browser/actions";
+import { executeAction, findAlternativeClickTarget, findSearchField } from "@/browser/actions";
 import { observePage } from "@/browser/observer";
+import { isBrokenPage, queryFromGoal, searchUrl } from "@/browser/search";
 import {
   createPlan,
   decideNextAction,
@@ -41,6 +42,7 @@ type SessionState = {
   controlWaiters: Array<(command: AgentControlCommand) => void>;
   pendingCommand?: AgentControlCommand;
   abort: boolean;
+  armApproveNext: boolean;
 };
 
 const sessions = new Map<string, SessionState>();
@@ -130,6 +132,15 @@ export function sendControl(sessionId: string, command: AgentControlCommand) {
     return { ok: true };
   }
 
+  if (command === "arm_approve_next") {
+    session.armApproveNext = true;
+    emit(session, {
+      type: "decision",
+      message: "Next browser action will wait for your approval.",
+    });
+    return { ok: true };
+  }
+
   const waiter = session.controlWaiters.shift();
   if (waiter) {
     waiter(command);
@@ -172,6 +183,7 @@ export async function startAgentSession(goal: string) {
     createdAt: Date.now(),
     controlWaiters: [],
     abort: false,
+    armApproveNext: false,
   };
   sessions.set(id, session);
 
@@ -234,6 +246,7 @@ async function runAgent(session: SessionState) {
   let activeStep = 0;
   let observation = null as Awaited<ReturnType<typeof observePage>> | null;
   let checkpointShown = false;
+  let retryAction: Awaited<ReturnType<typeof decideNextAction>> | null = null;
 
   for (let step = 0; step < MAX_STEPS; step++) {
     await respectPause(session);
@@ -243,35 +256,78 @@ async function runAgent(session: SessionState) {
     }
 
     let action;
-    try {
-      action = await decideNextAction({
-        goal: session.goal,
-        plan: session.plan,
-        observation,
-        memory: session.memory.slice(-8).join("\n"),
-        companies: session.companies,
-        stepIndex: activeStep,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Model response was invalid";
-      session.retries += 1;
-      emit(session, {
-        type: "retry",
-        attempt: session.retries,
-        reason: message,
-        strategy: "Asking the model again with a simpler JSON request",
-      });
-      if (session.retries >= MAX_RETRIES * 3) {
-        await finish(session, "Stopped after repeated model-format failures. Compiling what was collected.");
-        return;
+    if (retryAction) {
+      action = retryAction;
+      retryAction = null;
+    } else {
+      try {
+        action = await decideNextAction({
+          goal: session.goal,
+          plan: session.plan,
+          observation,
+          memory: session.memory.slice(-8).join("\n"),
+          companies: session.companies,
+          stepIndex: activeStep,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Model response was invalid";
+        session.retries += 1;
+        emit(session, {
+          type: "retry",
+          attempt: session.retries,
+          reason: message,
+          strategy: "Asking the model again with a simpler JSON request",
+        });
+        if (session.retries >= MAX_RETRIES * 3) {
+          await finish(session, "Stopped after repeated model-format failures. Compiling what was collected.");
+          return;
+        }
+        continue;
       }
-      continue;
     }
 
     emit(session, {
       type: "decision",
       message: "explanation" in action ? action.explanation : summarizeAction(action),
     });
+
+    const mutating =
+      action.type === "navigate" ||
+      action.type === "click" ||
+      action.type === "fill" ||
+      action.type === "type";
+
+    if (mutating && session.armApproveNext) {
+      session.armApproveNext = false;
+      const preview = actionPreview(action);
+      emit(session, {
+        type: "approval_required",
+        reason: "Approve this next action before the agent continues.",
+        actionPreview: preview,
+      });
+      emit(session, {
+        type: "status",
+        status: "awaiting_approval",
+        message: preview,
+      });
+      const command = await waitForControl(session, ["approve", "reject", "stop"]);
+      if (command === "stop") {
+        session.abort = true;
+        emit(session, { type: "status", status: "stopped", message: "Stopped by user" });
+        await cleanupSession(session);
+        return;
+      }
+      if (command === "reject") {
+        session.memory.push(`Human skipped action: ${preview}`);
+        emit(session, {
+          type: "decision",
+          message: "Skipped this action after you rejected it.",
+        });
+        emit(session, { type: "status", status: "running" });
+        continue;
+      }
+      emit(session, { type: "status", status: "running", message: "Action approved" });
+    }
 
     if (action.type === "ask_human") {
       emit(session, {
@@ -421,15 +477,37 @@ async function runAgent(session: SessionState) {
     const executed = await executeWithRecovery(session, page, action);
     if (!executed.ok) {
       session.memory.push(`Failed action ${action.type}: ${executed.detail}`);
-      if (session.retries >= MAX_RETRIES * 2) {
-        emit(session, {
-          type: "error",
-          message: `Couldn't reliably complete browser actions. Last issue: ${executed.detail}`,
-          recoverable: true,
-        });
-        await finish(session, "Partial research completed after repeated recovery attempts.");
+      emit(session, {
+        type: "step_failed",
+        reason: executed.detail,
+        actionLabel: actionPreview(action),
+      });
+      emit(session, {
+        type: "status",
+        status: "awaiting_recovery",
+        message: executed.detail,
+      });
+      const command = await waitForControl(session, [
+        "retry_step",
+        "skip_step",
+        "stop",
+      ]);
+      if (command === "stop") {
+        session.abort = true;
+        emit(session, { type: "status", status: "stopped", message: "Stopped after a failed step" });
+        await cleanupSession(session);
         return;
       }
+      if (command === "retry_step") {
+        retryAction = action;
+        emit(session, { type: "status", status: "running", message: "Retrying the failed step" });
+        continue;
+      }
+      emit(session, {
+        type: "decision",
+        message: "Skipped this step after retries. Trying another approach.",
+      });
+      emit(session, { type: "status", status: "running" });
       continue;
     }
 
@@ -439,14 +517,48 @@ async function runAgent(session: SessionState) {
       detail: executed.detail,
     });
 
-    if (action.type === "navigate") {
+    const previousUrl = observation?.url;
+    observation = await observePage(page);
+    emitObservation(session, observation);
+    if (observation.url !== previousUrl) {
       session.pagesVisited += 1;
+    }
+
+    if (
+      (action.type === "navigate" ||
+        action.type === "fill" ||
+        action.type === "type" ||
+        action.type === "click") &&
+      isBrokenPage(observation)
+    ) {
+      const fallback = searchUrl(queryFromGoal(session.goal), "bing");
+      session.memory.push(
+        `Page looked broken (${observation.url}). Next, try ${fallback} or fill a search box.`
+      );
+      emit(session, {
+        type: "retry",
+        attempt: 1,
+        reason: `The page at ${observation.url} did not load useful content.`,
+        strategy: `Falling back to Bing search or filling a search field`,
+      });
+      const searchField = await findSearchField(page);
+      if (!searchField && action.type === "navigate") {
+        try {
+          await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 30000 });
+          session.pagesVisited += 1;
+          observation = await observePage(page);
+          emitObservation(session, observation);
+        } catch {
+          // leave observation as-is; model will decide next
+        }
+      }
+    }
+
+    if (action.type === "navigate" || action.type === "fill") {
       maybeAdvancePlan(session, activeStep);
       activeStep = Math.min(activeStep + 1, session.plan.length - 1);
     }
 
-    observation = await observePage(page);
-    emitObservation(session, observation);
     session.memory.push(`${action.type}: ${executed.detail} @ ${observation.url}`);
   }
 
@@ -507,6 +619,15 @@ async function executeWithRecovery(
         ]);
         if (alt) {
           strategy = `Trying alternative selector: ${alt}`;
+          action = { ...action, selector: alt };
+        }
+      } else if (
+        (action.type === "fill" || action.type === "type") &&
+        attempt === 2
+      ) {
+        const alt = await findSearchField(page);
+        if (alt) {
+          strategy = `Filling an alternative field: ${alt}`;
           action = { ...action, selector: alt };
         }
       } else if (action.type === "navigate" && attempt >= 2) {
@@ -581,8 +702,14 @@ async function finish(session: SessionState, summaryHint: string) {
   await cleanupSession(session);
 }
 
-function summarizeAction(action: { type: string }) {
+function actionPreview(action: Parameters<typeof executeAction>[1] | { type: string }) {
+  if ("explanation" in action && typeof action.explanation === "string") {
+    return action.explanation;
+  }
   switch (action.type) {
+    case "fill":
+    case "type":
+      return "Fill a field on the page";
     case "ask_human":
       return "Waiting for human approval";
     case "checkpoint":
@@ -592,6 +719,10 @@ function summarizeAction(action: { type: string }) {
     default:
       return `Next: ${action.type}`;
   }
+}
+
+function summarizeAction(action: { type: string }) {
+  return actionPreview(action);
 }
 
 // Cleanup old sessions periodically
