@@ -14,6 +14,13 @@ const actionSchema = z.discriminatedUnion("type", [
     explanation: z.string(),
   }),
   z.object({
+    type: z.literal("fill"),
+    selector: z.string(),
+    text: z.string(),
+    pressEnter: z.boolean().optional(),
+    explanation: z.string(),
+  }),
+  z.object({
     type: z.literal("type"),
     selector: z.string(),
     text: z.string(),
@@ -220,17 +227,23 @@ ${input.observation.interactiveElements
   .slice(0, 25)
   .map((el) => `- ${el.tag}: "${el.text}" => ${el.selector}`)
   .join("\n")}`
-    : "No page loaded yet. Start by navigating to a search engine or relevant directory.";
+    : "No page loaded yet. Navigate to https://html.duckduckgo.com/html/?q=YOUR+QUERY";
 
   const raw = await chatJson<AgentAction>(
     `You are ResearchPilot, an autonomous browser research agent.
 Choose ONE next action to progress the goal.
-Prefer DuckDuckGo (https://duckduckgo.com) for search to avoid captchas.
-Use company websites, Crunchbase-like public pages, Wellfound, LinkedIn public pages carefully.
-Use selectors from the interactive elements list when clicking/typing.
+
+If no page is loaded yet, navigate to a search results URL. Prefer:
+https://html.duckduckgo.com/html/?q=YOUR+QUERY
+If that page errors, use:
+https://www.bing.com/search?q=YOUR+QUERY
+
+To search from a homepage, FILL the search box (action type "fill") with the query and set pressEnter true. Do not skip filling when a search input is visible.
+
+Use company websites to verify product, pricing, customers, and careers. Click pricing/careers/about when those links exist.
 Use extract when the page has useful company facts.
-Use checkpoint after discovering a company shortlist or mid-research.
-Use ask_human only for consequential navigations (job applications, logins, purchases).
+Use checkpoint after a company shortlist.
+Use ask_human only for logins, purchases, or job applications.
 Use done when you have enough verified structured data for a useful comparison.
 Explanations must be short, user-facing decision notes — never private chain-of-thought.`,
     `Goal: ${input.goal}
@@ -246,7 +259,7 @@ ${input.memory || "None"}
 
 Current observation:
 ${observationText}`,
-    `{ "type": "navigate|click|type|scroll|extract|wait|ask_human|checkpoint|done", ...fields, "explanation": "..." }`
+    `{ "type": "navigate|click|fill|type|scroll|extract|wait|ask_human|checkpoint|done", ...fields, "explanation": "..." }`
   );
 
   const parsed = actionSchema.safeParse(raw);
