@@ -1,104 +1,82 @@
 # ResearchPilot
 
-An AI web research agent that turns a plain-English goal into an **observable, steerable browser workflow**.
+ResearchPilot is an AI research agent that works in a real browser.
 
-It plans dynamically, drives a real Chromium session with Playwright, streams decisions / actions / screenshots over SSE, recovers from failures, pauses for human approval or checkpoints, and finishes with a source-backed comparison table.
+You give it a goal in plain English. It plans the work, opens pages, reads them, extracts what it needs, and shows you everything as it happens. When it’s done, you get a structured comparison with source links.
 
-## Demo goal
+This is built as a control room, not a chat window. You can see the plan, the live page, and each action. You can pause, stop, or approve a step when the agent asks.
 
-> Research 5 AI accounting startups in the US. Find their website, product, target customer, pricing, funding, and current engineering openings. Verify the information from their websites and give me a comparison.
+## Example goal
 
-## Stack
+Research 5 AI accounting startups in the US. Find website, product, target customer, pricing, funding, and engineering openings. Verify from their sites and compare.
 
-- **Frontend:** Next.js (App Router), TypeScript, Tailwind
-- **Agent loop:** observe → LLM decides one action → execute → observe
-- **Browser:** Playwright (Chromium)
-- **LLM:** Groq (OpenAI-compatible chat completions + JSON)
-- **Streaming:** Server-Sent Events
+## How to run locally
 
-## Why this is not a chatbot
-
-The main screen is an agent control room:
-
-- Plan panel with live step status
-- Live browser screenshots
-- Activity feed of decisions and actions (concise explanations, not raw chain-of-thought)
-- Pause / Resume / Stop
-- Approval gates for consequential actions
-- Mid-run checkpoints to review progress before continuing
-- Structured final report with source links
-
-## Local setup
+1. Install dependencies:
 
 ```bash
 npm install
-npx playwright install chromium
-cp .env.example .env.local
-# put your Groq key in .env as GROQ_API_KEY
+```
+
+2. Add your Groq key to a `.env` file:
+
+```bash
+cp .env.example .env
+```
+
+Then set `GROQ_API_KEY`. You can also set `GROQ_MODEL` if you want a different model.
+
+3. Start the app:
+
+```bash
 npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
 
-## Deploy notes
+## Stack
 
-A real browser agent needs a long-running Node server (Playwright will not work on Vercel serverless alone).
+- Next.js + TypeScript
+- Playwright for the browser
+- Groq for the LLM
+- SSE to stream agent events to the UI
 
-Good options:
+## How the agent works
 
-- **Railway / Render / Fly.io** — deploy this Next.js app as a Node service
-- Ensure Chromium system deps are available (`npx playwright install --with-deps chromium` in the build/start phase)
-- Set `GROQ_API_KEY` (and optionally `GROQ_MODEL`) in the host env
+1. Create a plan from the goal
+2. Look at the current page
+3. Ask the model for one next action
+4. Run that action in the browser
+5. Repeat until the research is done
+6. Return a clean table with sources
 
-Suggested start command:
+If something fails, it retries a few times and tells you what went wrong.
+
+## Controls
+
+- **Pause / Resume** — hold or continue before the next action
+- **Stop** — end the run
+- **Approve / Reject** — when the agent wants a human decision
+- **Checkpoint** — review progress mid-run, then continue or stop
+
+## Deploy
+
+Playwright needs a normal Node server, so this should not be deployed as Vercel serverless alone.
+
+Use Railway, Render, or Fly. Set `GROQ_API_KEY` there. A Dockerfile is included for that setup.
 
 ```bash
-npx playwright install chromium && npm run build && npm run start
+npm run build
+npm run start
 ```
 
-## Architecture
-
-```
-UI (control room)
-   │  POST /api/agent/start
-   │  GET  /api/agent/stream  (SSE)
-   │  POST /api/control
-   ▼
-Agent session (in-memory)
-   ├── Planner LLM
-   ├── Decision LLM (one action at a time)
-   ├── Playwright executor + screenshot observer
-   ├── Recovery (retries + alternate selectors)
-   └── Result synthesizer → structured table
-```
-
-## Human control
-
-| Control | Behavior |
-|---|---|
-| Pause | Stops before the next action |
-| Resume | Continues the loop |
-| Stop | Terminates the run |
-| Approve / Reject | Gates `ask_human` actions |
-| Checkpoint Continue | Confirms mid-research progress |
-
-## Project layout
+## Project structure
 
 ```
 src/
-  agent/          # loop, types, recovery helpers
-  browser/        # Playwright session, actions, screenshots, observe
-  llm/            # Groq (OpenAI-compatible) client + structured prompts
-  components/     # control-room UI
-  app/api/        # start, stream, control
+  agent/       agent loop and types
+  browser/     Playwright actions and screenshots
+  llm/         Groq client and prompts
+  components/  control room UI
+  app/api/     start, stream, and control routes
 ```
-
-## Evaluation checklist
-
-- [x] Natural-language goal
-- [x] Multi-step browser actions with LLM in the loop (not a hardcoded script)
-- [x] Live streaming of decisions, actions, and page screenshots
-- [x] Pause / stop / approve human control
-- [x] Recovery with retries and clear failure reporting
-- [x] Structured, source-backed final result
-- [x] Differentiator: research checkpoints for steerability
