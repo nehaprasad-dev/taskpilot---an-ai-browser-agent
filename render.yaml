@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: researchpilot
+    runtime: docker
+    plan: starter
+    healthCheckPath: /
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
