@@ -85,7 +85,8 @@ Actions the model can choose:
 
 - **navigate** — go to a URL
 - **click** — click something on the page
-- **type** — type into a field (search boxes, etc.)
+- **fill** — fill a search box or form field, optionally submit with Enter
+- **type** — same as fill (kept for the model)
 - **scroll** — move the page
 - **extract** — pull structured facts from the current page
 - **wait** — brief wait for the page
@@ -101,7 +102,7 @@ Clicks and navigation retry up to 3 times. On retry it may try another selector 
 
 If the model returns invalid JSON, it asks again instead of failing silently.
 
-If it still cannot finish a step, it reports the error in the activity feed. After too many failures it compiles whatever it already collected rather than hanging forever.
+If a click, fill, or navigation still fails after 3 tries, the run pauses. You get **Retry**, **Skip**, or **Stop**. Nothing fails silently.
 
 ## Human control
 
@@ -110,8 +111,10 @@ If it still cannot finish a step, it reports the error in the activity feed. Aft
 | Pause | Stops before the next action |
 | Resume | Continues |
 | Stop | Ends the session |
-| Approve / Reject | For steps the agent marked as needing a person |
-| Continue / Stop at checkpoint | Review the shortlist and missing fields, then keep going or stop |
+| Approve next action | The following navigate / click / fill waits for Approve or Reject |
+| Approve / Reject | Confirm or skip that step |
+| Retry / Skip / Stop | After a step fails three times |
+| Checkpoint Continue | Review progress, then keep going or stop |
 
 ## API
 
@@ -121,7 +124,7 @@ The UI talks to a small Next.js backend (sessions live in memory on that process
 |---|---|
 | `POST /api/agent/start` | Start a run with `{ "goal": "..." }`, returns `{ "sessionId": "..." }` |
 | `GET /api/agent/stream?sessionId=...` | SSE stream of plan, actions, screenshots, errors, result |
-| `POST /api/control` | `{ "sessionId", "command" }` where command is `pause`, `resume`, `stop`, `approve`, `reject`, or `continue_checkpoint` |
+| `POST /api/control` | `{ "sessionId", "command" }` — `pause`, `resume`, `stop`, `approve`, `reject`, `continue_checkpoint`, `arm_approve_next`, `retry_step`, `skip_step` |
 
 ## Layout
 
@@ -140,9 +143,9 @@ src/
 
 Playwright needs a long-running Node process. Vercel serverless alone is not enough.
 
-Use Railway, Render, or Fly. There is a `Dockerfile` (Playwright base image) and `railway.toml`.
+Use Railway, Render, or Fly. There is a `Dockerfile`, `railway.toml`, and `render.yaml`.
 
-Set `GROQ_API_KEY` (and optionally `GROQ_MODEL`) on the host.
+Set `GROQ_API_KEY` (and optionally `GROQ_MODEL`) on the host. The container listens on `PORT`.
 
 ```bash
 npm run build
