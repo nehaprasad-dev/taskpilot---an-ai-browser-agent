@@ -1,4 +1,4 @@
-import { getSession, subscribeToSession } from "@/agent/loop";
+import { subscribeToSession, waitForSession } from "@/agent/loop";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,9 +11,15 @@ export async function GET(request: Request) {
     return new Response("sessionId required", { status: 400 });
   }
 
-  const session = getSession(sessionId);
+  const session = await waitForSession(sessionId);
   if (!session) {
-    return new Response("Session not found", { status: 404 });
+    return new Response(
+      JSON.stringify({
+        error:
+          "Session was not found. Restart `npm run dev` and click New research. Do not refresh mid-run.",
+      }),
+      { status: 404, headers: { "Content-Type": "application/json" } }
+    );
   }
 
   const encoder = new TextEncoder();
@@ -22,7 +28,11 @@ export async function GET(request: Request) {
   const stream = new ReadableStream({
     start(controller) {
       const send = (data: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        } catch {
+          // stream already closed
+        }
       };
 
       send({ type: "connected", sessionId });

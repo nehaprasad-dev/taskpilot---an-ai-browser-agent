@@ -6,10 +6,13 @@ export async function getBrowser(): Promise<Browser> {
   if (!sharedBrowser || !sharedBrowser.isConnected()) {
     sharedBrowser = await chromium.launch({
       headless: true,
+      chromiumSandbox: false,
       args: [
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
         "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-http2",
       ],
     });
   }
@@ -23,11 +26,13 @@ export async function createSessionContext(): Promise<{
   const browser = await getBrowser();
   const context = await browser.newContext({
     viewport: { width: 1280, height: 800 },
+    ignoreHTTPSErrors: true,
     userAgent:
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
   });
   const page = await context.newPage();
-  page.setDefaultTimeout(20000);
+  page.setDefaultTimeout(8000);
+  page.setDefaultNavigationTimeout(15000);
   return { context, page };
 }
 

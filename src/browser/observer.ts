@@ -19,15 +19,18 @@ function isNavigationError(error: unknown): boolean {
 }
 
 export async function waitForStablePage(page: Page) {
-  await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => undefined);
-  await page.waitForTimeout(400);
+  await page.waitForLoadState("domcontentloaded", { timeout: 6000 }).catch(() => undefined);
 }
 
 async function readPageContent(page: Page) {
   return page.evaluate(() => {
     const junk =
       /accessibility|feedback|cookie|privacy|terms of|sign in|log in|microsoft|advertisement|skip to|languages/i;
-    const bodyText = document.body?.innerText ?? "";
+    const main =
+      document.querySelector("#mw-content-text") ||
+      document.querySelector("main") ||
+      document.body;
+    const bodyText = (main as HTMLElement)?.innerText ?? "";
     const candidates = Array.from(
       document.querySelectorAll(
         "a, button, input, textarea, [role='button'], [role='link']"
@@ -49,9 +52,10 @@ async function readPageContent(page: Page) {
         )
           .replace(/\s+/g, " ")
           .trim()
-          .slice(0, 80);
+          .slice(0, 48);
 
         if (junk.test(text) || junk.test(href)) return null;
+        if (text.length > 48) return null;
 
         let selector = "";
         if (el.id) {
@@ -75,7 +79,7 @@ async function readPageContent(page: Page) {
         };
       })
       .filter((item): item is NonNullable<typeof item> => Boolean(item?.selector))
-      .slice(0, 25);
+      .slice(0, 16);
 
     return {
       excerpt: bodyText.slice(0, 5000),
@@ -87,7 +91,7 @@ async function readPageContent(page: Page) {
 export async function observePage(page: Page): Promise<PageObservation> {
   let lastError: unknown;
 
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       await waitForStablePage(page);
       const url = page.url();
@@ -104,7 +108,7 @@ export async function observePage(page: Page): Promise<PageObservation> {
       };
     } catch (error) {
       lastError = error;
-      if (!isNavigationError(error) || attempt === 4) {
+      if (!isNavigationError(error) || attempt === 2) {
         throw error;
       }
       await page.waitForTimeout(500 * attempt);

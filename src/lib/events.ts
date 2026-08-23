@@ -23,11 +23,13 @@ export class EventBus {
   }
 
   getHistory(): AgentEvent[] {
+    const lastWithShot = [...this.history]
+      .reverse()
+      .find((event) => event.type === "page_observed" && event.screenshot);
     return this.history.map((event) => {
-      if (event.type === "page_observed") {
-        return { ...event, screenshot: "" };
-      }
-      return event;
+      if (event.type !== "page_observed") return event;
+      if (lastWithShot && event === lastWithShot) return event;
+      return { ...event, screenshot: "" };
     });
   }
 }

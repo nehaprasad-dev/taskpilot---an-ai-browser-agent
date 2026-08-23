@@ -34,6 +34,8 @@ const STOP = new Set([
   "compile",
   "table",
   "brief",
+  "startup",
+  "startups",
 ]);
 
 const TOPIC = [
@@ -45,8 +47,6 @@ const TOPIC = [
   "bookkeep",
   "invoicing",
   "ledger",
-  "startup",
-  "startups",
   "software",
   "saas",
   "fintech",
@@ -74,6 +74,22 @@ export function searchQueryFromGoal(goal: string): string {
   return query || "AI accounting software";
 }
 
+export function wikiQueriesForGoal(goal: string): string[] {
+  const base = searchQueryFromGoal(goal);
+  return [
+    ...new Set([
+      "Xero accounting software",
+      "FreshBooks",
+      "Wave accounting software",
+      "Zoho Books",
+      "FreeAgent accounting",
+      base,
+      "bookkeeping software",
+      "AI bookkeeping",
+    ]),
+  ];
+}
+
 export function topicKeywords(goal: string): string[] {
   return searchQueryFromGoal(goal)
     .split(/\s+/)
@@ -98,12 +114,22 @@ export function isMissingWikipediaArticle(observation: PageObservation): boolean
   );
 }
 
+const OFF_TOPIC =
+  /manus|softbank|deepseek|chatgpt|openai|anthropic|gemini|grok|claude|midjourney/i;
+
+export function isOffTopicPage(observation: PageObservation, goal: string): boolean {
+  if (OFF_TOPIC.test(goal)) return false;
+  const blob = `${observation.title} ${observation.url}`;
+  return OFF_TOPIC.test(blob);
+}
+
 export function isBrokenPage(observation: PageObservation): boolean {
   const text = `${observation.title} ${observation.excerpt}`.toLowerCase();
   const url = observation.url.toLowerCase();
   return (
     url.includes("bing.com") ||
     url.includes("duckduckgo.com") ||
+    url.includes("techcrunch.com") ||
     text.includes("unexpected error") ||
     text.includes("if this persists") ||
     text.includes("anonymized error code") ||
@@ -113,6 +139,9 @@ export function isBrokenPage(observation: PageObservation): boolean {
     text.includes("please verify you are a human") ||
     text.includes("solve the challenge") ||
     text.includes("one last step") ||
-    text.includes("verifying...")
+    text.includes("verifying...") ||
+    text.includes("page not found") ||
+    text.includes("lost this page") ||
+    /\b404\b/.test(text)
   );
 }

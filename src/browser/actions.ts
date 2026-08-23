@@ -1,5 +1,6 @@
 import type { Page } from "playwright";
 import type { AgentAction } from "@/agent/types";
+import { isBlockedUrl } from "@/browser/policy";
 import { searchUrl } from "@/browser/search";
 
 function resolveSelector(selector: string): string {
@@ -17,7 +18,16 @@ function isJunkClick(selector: string): boolean {
 }
 
 const SKIP_WIKI =
-  /softbank|main_page|special:|wikipedia:|help:|file:|talk:|template:|portal:|disambiguation/i;
+  /softbank|manus|deepseek|chatgpt|unicorn|billionaire|main_page|special:|wikipedia:|help:|file:|talk:|template:|portal:|disambiguation|sage_50|\/wiki\/accounting$/i;
+
+function isBadClick(selector: string): boolean {
+  return (
+    isJunkClick(selector) ||
+    /mw-search-result/i.test(selector) ||
+    selector.length > 90 ||
+    /manus|softbank|deepseek|chatgpt|launched in china|challenging gpt/i.test(selector)
+  );
+}
 
 export async function openRelevantWikiResult(
   page: Page,
@@ -25,8 +35,8 @@ export async function openRelevantWikiResult(
 ): Promise<{ ok: boolean; detail: string } | null> {
   const href = await page
     .evaluate((keys) => {
-      const skip =
-        /softbank|main_page|special:|wikipedia:|help:|file:|talk:|template:|portal:/i;
+          const skip =
+            /softbank|manus|deepseek|chatgpt|unicorn|billionaire|\/wiki\/Accounting$|\/wiki\/Sage_50|\/wiki\/Microsoft|\/wiki\/Dynamics|\/wiki\/ADempiere|\/wiki\/Apache_OFBiz|\/wiki\/GnuCash|\/wiki\/bookkeeping|main_page|special:|wikipedia:|help:|file:|talk:|template:|portal:/i;
       const anchors = Array.from(
         document.querySelectorAll(
           ".mw-search-result-heading a[href^='/wiki/'], .mw-search-results a[href^='/wiki/']"
@@ -42,10 +52,15 @@ export async function openRelevantWikiResult(
             0
           );
           const bonus =
-            /account|bookkeep|software|startup|invoic|ledger|automat/.test(text)
-              ? 3
+            /account|bookkeep|software|invoic|ledger|automat|xero|quickbooks|comparison/.test(text)
+              ? 6
               : 0;
-          return { href, score: score + bonus };
+          const penalty = /unicorn|country|billionaire|\/wiki\/Accounting$|\/wiki\/Sage_50|\/wiki\/Microsoft|Dynamics_365/.test(
+            href
+          )
+              ? -25
+              : 0;
+          return { href, score: score + bonus + penalty };
         })
         .filter((item): item is { href: string; score: number } => Boolean(item))
         .sort((a, b) => b.score - a.score);
@@ -54,7 +69,7 @@ export async function openRelevantWikiResult(
     .catch(() => null);
 
   if (!href || SKIP_WIKI.test(href)) return null;
-  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 15000 });
   await page.waitForTimeout(500);
   return { ok: true, detail: `Opened Wikipedia result: ${href}` };
 }
@@ -92,37 +107,84 @@ export async function openFirstOrganicResult(
     .catch(() => null);
 
   if (!href || SKIP_WIKI.test(href)) return null;
-  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 15000 });
   await page.waitForTimeout(500);
   return { ok: true, detail: `Opened search result: ${href}` };
+}
+
+export async function findOfficialWebsiteHref(page: Page): Promise<string | null> {
+  const href = await page
+    .evaluate(() => {
+      const skip =
+        /techcrunch|forbes|bloomberg|reuters|yahoo|businessinsider|wired|theverge|crunchbase|linkedin|twitter|facebook|wikipedia|wikimedia|web.archive|archive.org/i;
+
+      const usable = (raw?: string | null) => {
+        if (!raw) return null;
+        let next = raw.trim();
+        if (next.startsWith("//")) next = `https:${next}`;
+        if (!/^https?:\/\//i.test(next)) return null;
+        if (skip.test(next)) return null;
+        return next;
+      };
+
+      for (const row of Array.from(document.querySelectorAll(".infobox tr"))) {
+        const label = (row.querySelector("th, .infobox-label")?.textContent || "").toLowerCase();
+        if (!/website|url|homepage/.test(label)) continue;
+        const link = row.querySelector("a[href]") as HTMLAnchorElement | null;
+        const found = usable(link?.href || link?.getAttribute("href"));
+        if (found) return found;
+      }
+
+      for (const link of Array.from(
+        document.querySelectorAll(".infobox a.external, .infobox a[rel='nofollow']")
+      ) as HTMLAnchorElement[]) {
+        const found = usable(link.href);
+        if (found) return found;
+      }
+
+      const official = Array.from(document.querySelectorAll("a")).find((el) =>
+        /^official website$/i.test((el.textContent || "").trim())
+      ) as HTMLAnchorElement | undefined;
+      return usable(official?.href) || null;
+    })
+    .catch(() => null);
+
+  if (!href || isBlockedUrl(href)) return null;
+  return href;
 }
 
 export async function openOfficialWebsite(
   page: Page
 ): Promise<{ ok: boolean; detail: string } | null> {
-  const href = await page
-    .evaluate(() => {
-      const labeled = Array.from(
-        document.querySelectorAll(".infobox a.external, a.external")
-      ) as HTMLAnchorElement[];
-      for (const link of labeled) {
-        const context = `${link.textContent || ""} ${link.closest("tr")?.innerText || ""}`.toLowerCase();
-        const href = link.href;
-        if (!href.startsWith("http")) continue;
-        if (/wikipedia\.org|wikimedia|web.archive|isbn|doi.org/.test(href)) continue;
-        if (/official|website|homepage|url/.test(context) || labeled.length === 1) {
-          return href;
-        }
-      }
-      return labeled.find((link) => /^https?:/.test(link.href) && !/wikipedia/.test(link.href))
-        ?.href || null;
-    })
-    .catch(() => null);
-
+  const href = await findOfficialWebsiteHref(page);
   if (!href) return null;
-  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 15000 });
   await page.waitForTimeout(600);
   return { ok: true, detail: `Opened official website: ${href}` };
+}
+
+export async function scrapeWikiCompanyNames(page: Page): Promise<string[]> {
+  return page
+    .evaluate(() => {
+      const skip =
+        /^(talk|file|help|category|template|special|wikipedia|main page|citation|edit|accounting|bookkeeping|finance|software|list of)/i;
+      const skipHref = /\/wiki\/(Accounting|Bookkeeping|Finance|Software|Artificial_intelligence|Sage_50|Sage_Group|Microsoft|Microsoft_Dynamics|ADempiere|Apache_OFBiz|GnuCash)/;
+      const links = Array.from(
+        document.querySelectorAll("#mw-content-text li a[href^='/wiki/'], #mw-content-text td a[href^='/wiki/']")
+      ) as HTMLAnchorElement[];
+      const names: string[] = [];
+      for (const link of links) {
+        const name = (link.textContent || "").trim();
+        const href = link.getAttribute("href") || "";
+        if (name.length < 3 || name.length > 42) continue;
+        if (skip.test(name) || skipHref.test(href) || /:/.test(href.replace("/wiki/", ""))) continue;
+        if (/\d{4}/.test(name)) continue;
+        if (!/[A-Z]/.test(name[0] || "")) continue;
+        names.push(name);
+      }
+      return [...new Set(names)].slice(0, 10);
+    })
+    .catch(() => []);
 }
 
 async function fillField(
@@ -133,8 +195,8 @@ async function fillField(
 ): Promise<{ ok: boolean; detail: string }> {
   const resolved = resolveSelector(selector);
   const locator = page.locator(resolved).first();
-  await locator.waitFor({ state: "visible", timeout: 10000 });
-  await locator.click({ timeout: 10000 });
+  await locator.waitFor({ state: "visible", timeout: 4000 });
+  await locator.click({ timeout: 4000 });
   await locator.fill(text);
   if (pressEnter) {
     await page.keyboard.press("Enter");
@@ -156,22 +218,25 @@ export async function executeAction(
   switch (action.type) {
     case "navigate": {
       let url = action.url;
-      if (/bing\.com|google\.com\/search|duckduckgo\.com/i.test(url)) {
+      if (isBlockedUrl(url) || /bing\.com|google\.com\/search|duckduckgo\.com/i.test(url)) {
         let query = "";
         try {
           query = new URL(url).searchParams.get("q") || "";
         } catch {
           query = "";
         }
-        url = searchUrl(query || "search", "wiki");
+        url = searchUrl(query || "AI accounting software", "wiki");
       }
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await page.waitForLoadState("domcontentloaded").catch(() => undefined);
-      await page.waitForTimeout(500);
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
       return { ok: true, detail: `Navigated to ${url}` };
     }
     case "click": {
-      if (isJunkClick(action.selector) || /mw-search-result/i.test(action.selector)) {
+      if (/official website/i.test(action.selector)) {
+        const opened = await openOfficialWebsite(page);
+        if (opened) return opened;
+        return { ok: false, detail: "No official website link on this page" };
+      }
+      if (isBadClick(action.selector)) {
         const opened = await openRelevantWikiResult(page, [
           "accounting",
           "software",
@@ -181,19 +246,16 @@ export async function executeAction(
           "ai",
         ]);
         if (opened) return opened;
-        if (isJunkClick(action.selector)) {
-          return { ok: false, detail: `Skipped junk click: ${action.selector}` };
-        }
+        return { ok: false, detail: `Skipped off-topic click: ${action.selector.slice(0, 80)}` };
       }
       const selector = resolveSelector(action.selector);
       const locator = page.locator(selector).first();
       try {
-        await locator.click({ timeout: 8000 });
+        await locator.click({ timeout: 2500 });
       } catch {
-        await locator.click({ timeout: 5000, force: true });
+        return { ok: false, detail: `Click missed (${selector.slice(0, 80)})` };
       }
       await page.waitForLoadState("domcontentloaded").catch(() => undefined);
-      await page.waitForTimeout(700);
       return { ok: true, detail: `Clicked ${action.selector}` };
     }
     case "type":

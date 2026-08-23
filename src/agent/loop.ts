@@ -15,28 +15,45 @@ import {
   executeAction,
   findAlternativeClickTarget,
   findSearchField,
+  findOfficialWebsiteHref,
   openOfficialWebsite,
   openRelevantWikiResult,
+  scrapeWikiCompanyNames,
 } from "@/browser/actions";
 import { observePage } from "@/browser/observer";
 import {
   isBrokenPage,
   isMissingWikipediaArticle,
+  isOffTopicPage,
   isWikipediaSearchPage,
   searchQueryFromGoal,
   searchUrl,
   topicKeywords,
+  wikiQueriesForGoal,
 } from "@/browser/search";
+import {
+  isBlockedUrl,
+  isDeadPage,
+  isFamousAiLab,
+  isIncumbentHost,
+  isIncumbentVendor,
+  isOpenSourceErp,
+  isUselessWikiPage,
+  isWikipediaListPage,
+  cloudAccountingLookups,
+  officialSiteForName,
+} from "@/browser/policy";
+import { isNetworkFailure, networkFailureMessage } from "@/lib/errors";
 import {
   createPlan,
   decideNextAction,
   extractFromPage,
   synthesizeReport,
 } from "@/llm/client";
-import { fieldCoverage, filterVerifiedCompanies, mergeCompanies } from "@/agent/recovery";
+import { fieldCoverage, filterVerifiedCompanies, isJunkCompanyName, mergeCompanies } from "@/agent/recovery";
 
 const MAX_STEPS = 36;
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 1;
 
 type SessionState = {
   id: string;
@@ -59,9 +76,41 @@ type SessionState = {
   visitedUrls: string[];
   armApproveNext: boolean;
   extractedUrls: string[];
+  officialOpened: string[];
+  queryIndex: number;
+  probedOrigins: string[];
+  skippedNames: string[];
 };
 
-const sessions = new Map<string, SessionState>();
+const globalStore = globalThis as typeof globalThis & {
+  __researchPilotSessions?: Map<string, SessionState>;
+};
+const sessions =
+  globalStore.__researchPilotSessions ?? new Map<string, SessionState>();
+globalStore.__researchPilotSessions = sessions;
+
+function originOf(url: string) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
+  }
+}
+
+function isWikiUrl(url?: string) {
+  return Boolean(url && /wikipedia\.org|wikimedia\.org/i.test(url));
+}
+
+function companiesWithOfficialSites(session: SessionState) {
+  return session.companies.filter(
+    (company) =>
+      !isFamousAiLab(company.name, session.goal) &&
+      !isJunkCompanyName(company.name) &&
+      !isIncumbentVendor(company.name) &&
+      !isOpenSourceErp(company.name) &&
+      Boolean(company.website && !isWikiUrl(company.website))
+  );
+}
 
 function emit(session: SessionState, event: AgentEvent) {
   if (event.type === "status") {
@@ -124,6 +173,16 @@ async function respectPause(session: SessionState) {
 }
 
 export function getSession(sessionId: string) {
+  return sessions.get(sessionId);
+}
+
+export async function waitForSession(sessionId: string, timeoutMs = 8000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const session = sessions.get(sessionId);
+    if (session) return session;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   return sessions.get(sessionId);
 }
 
@@ -192,7 +251,10 @@ export async function startAgentSession(goal: string) {
     status: "planning",
     bus,
     plan: [],
-    companies: [],
+    companies: cloudAccountingLookups(goal).map((name) => ({
+      name,
+      sources: [],
+    })),
     pagesVisited: 0,
     retries: 0,
     memory: [],
@@ -202,6 +264,10 @@ export async function startAgentSession(goal: string) {
     visitedUrls: [],
     armApproveNext: false,
     extractedUrls: [],
+    officialOpened: [],
+    queryIndex: 0,
+    probedOrigins: [],
+    skippedNames: [],
   };
   sessions.set(id, session);
 
@@ -236,10 +302,10 @@ async function runAgent(session: SessionState) {
     plan = await createPlan(session.goal);
   } catch {
     plan = [
-      { id: "step-1", label: "Understand the research goal", status: "pending" },
-      { id: "step-2", label: "Search for relevant companies", status: "pending" },
-      { id: "step-3", label: "Open and verify company websites", status: "pending" },
-      { id: "step-4", label: "Extract product, pricing, funding, and jobs", status: "pending" },
+      { id: "step-1", label: "Open official company websites", status: "pending" },
+      { id: "step-2", label: "Read product and customer from each homepage", status: "pending" },
+      { id: "step-3", label: "Open pricing pages", status: "pending" },
+      { id: "step-4", label: "Open careers pages", status: "pending" },
       { id: "step-5", label: "Compile a source-backed comparison", status: "pending" },
     ];
     emit(session, {
@@ -256,35 +322,38 @@ async function runAgent(session: SessionState) {
   session.context = context;
   session.page = page;
 
-  emit(session, { type: "status", status: "running", message: "Opening a Wikipedia search for this goal" });
+  emit(session, { type: "status", status: "running", message: "Opening the first official company website" });
   if (session.plan[0]) {
     updatePlanStatus(session, (_s, i) => i === 0, "active");
   }
 
   let observation = null as Awaited<ReturnType<typeof observePage>> | null;
-  const startUrl = searchUrl(searchQueryFromGoal(session.goal), "wiki");
+  const startUrl = /account|bookkeep/i.test(session.goal)
+    ? officialSiteForName("Xero") || "https://www.xero.com"
+    : searchUrl(searchQueryFromGoal(session.goal), "wiki");
   emit(session, {
     type: "decision",
-    message: `Starting on Wikipedia search: ${startUrl}`,
+    message: `Starting on an official company site: ${startUrl}`,
   });
   emit(session, {
     type: "action_started",
     action: {
       type: "navigate",
       url: startUrl,
-      explanation: "Open Wikipedia search results for the goal",
+      explanation: "Open the official website",
     },
   });
   try {
-    await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
     session.pagesVisited += 1;
     observation = await observePage(page);
     emitObservation(session, observation);
     const keywords = topicKeywords(session.goal);
     if (
-      isWikipediaSearchPage(observation) ||
-      isMissingWikipediaArticle(observation) ||
-      isBrokenPage(observation)
+      observation.url.includes("wikipedia.org") &&
+      (isWikipediaSearchPage(observation) ||
+        isMissingWikipediaArticle(observation) ||
+        isBrokenPage(observation))
     ) {
       const opened = await openRelevantWikiResult(page, keywords);
       if (opened) {
@@ -304,12 +373,28 @@ async function runAgent(session: SessionState) {
       action: {
         type: "navigate",
         url: startUrl,
-        explanation: "Wikipedia search opened",
+        explanation: "Official website opened",
       },
       detail: `On ${observation?.url || startUrl}`,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not open Wikipedia search";
+    const message = error instanceof Error ? error.message : "Could not open the official website";
+    if (isNetworkFailure(message)) {
+      emit(session, {
+        type: "error",
+        message: networkFailureMessage(message),
+        recoverable: false,
+      });
+      emit(session, {
+        type: "page_observed",
+        url: startUrl,
+        title: "Could not load page",
+        screenshot: "",
+        excerpt: networkFailureMessage(message),
+      });
+      await finish(session, networkFailureMessage(message));
+      return;
+    }
     emit(session, {
       type: "retry",
       attempt: 1,
@@ -319,7 +404,6 @@ async function runAgent(session: SessionState) {
   }
 
   let activeStep = 0;
-  let checkpointShown = false;
   let retryAction: Awaited<ReturnType<typeof decideNextAction>> | null = null;
 
   for (let step = 0; step < MAX_STEPS; step++) {
@@ -335,26 +419,40 @@ async function runAgent(session: SessionState) {
       retryAction = null;
     } else {
       try {
-        if (
+        if (observation && isOffTopicPage(observation, session.goal)) {
+          action = {
+            type: "navigate",
+            url: searchUrl(searchQueryFromGoal(session.goal), "wiki"),
+            explanation: "Left an off-topic page and returned to Wikipedia search for the goal",
+          };
+        } else if (
           observation &&
+          !observation.url.includes("wikipedia.org") &&
           !session.extractedUrls.includes(observation.url) &&
           !isBrokenPage(observation) &&
-          !isMissingWikipediaArticle(observation)
+          !isDeadPage(observation) &&
+          !isBlockedUrl(observation.url) &&
+          !isMissingWikipediaArticle(observation) &&
+          !isWikipediaSearchPage(observation) &&
+          !isOffTopicPage(observation, session.goal)
         ) {
           action = {
             type: "extract",
-            instruction: "Extract companies and facts that appear on this page.",
+            instruction: "Extract only companies that match the research goal from this page.",
             explanation: "Reading the current page before choosing the next click",
           };
         } else {
-          action = await decideNextAction({
-            goal: session.goal,
-            plan: session.plan,
-            observation,
-            memory: session.memory.slice(-8).join("\n"),
-            companies: session.companies,
-            stepIndex: activeStep,
-          });
+          const heuristic = await pickFastAction(session, observation);
+          action =
+            heuristic ??
+            (await decideNextAction({
+              goal: session.goal,
+              plan: session.plan,
+              observation,
+              memory: session.memory.slice(-8).join("\n"),
+              companies: session.companies,
+              stepIndex: activeStep,
+            }));
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Model response was invalid";
@@ -470,35 +568,36 @@ async function runAgent(session: SessionState) {
     }
 
     if (action.type === "checkpoint") {
-      checkpointShown = true;
       emit(session, {
-        type: "checkpoint",
-        summary: action.summary,
-        collected: action.collected ?? [],
-        missing: action.missing ?? [],
+        type: "decision",
+        message: "Checkpoint noted — continuing so the run does not stall.",
       });
-      emit(session, {
-        type: "status",
-        status: "awaiting_checkpoint",
-        message: action.summary,
-      });
-      const command = await waitForControl(session, [
-        "continue_checkpoint",
-        "stop",
-      ]);
-      if (command === "stop") {
-        session.abort = true;
-        emit(session, { type: "status", status: "stopped", message: "Stopped at checkpoint" });
-        await cleanupSession(session);
-        return;
-      }
-      emit(session, { type: "status", status: "running", message: "Continuing from checkpoint" });
       continue;
     }
 
     if (action.type === "done") {
-      await finish(session, action.summary);
-      return;
+      const usable = companiesWithOfficialSites(session).filter(
+        (c) => c.product || c.pricing || c.targetCustomer
+      );
+      if (usable.length < 3 && step < MAX_STEPS - 2) {
+        const nextSite = nextOfficialUrl(session, observation?.url);
+        emit(session, {
+          type: "decision",
+          message: nextSite
+            ? `Need more official-site rows — opening the next company site.`
+            : "Need more official-site facts before finishing.",
+        });
+        action = {
+          type: "navigate",
+          url: nextSite || nextWikiSearch(session, observation?.url),
+          explanation: nextSite
+            ? "Open the next official website"
+            : "Keep researching until official-site facts are collected",
+        };
+      } else {
+        await finish(session, action.summary);
+        return;
+      }
     }
 
     emit(session, { type: "action_started", action });
@@ -528,7 +627,14 @@ async function runAgent(session: SessionState) {
           instruction: action.instruction,
           observation,
         });
-        session.companies = mergeCompanies(session.companies, extracted.companies);
+        const bound = bindExtractToHost(session, observation, extracted.companies);
+        session.companies = mergeCompanies(session.companies, bound).filter(
+          (c) =>
+            !isFamousAiLab(c.name, session.goal) &&
+            !isJunkCompanyName(c.name) &&
+            !isIncumbentVendor(c.name) &&
+            !isOpenSourceErp(c.name)
+        );
         if (extracted.insights) {
           session.memory.push(extracted.insights);
         }
@@ -545,44 +651,6 @@ async function runAgent(session: SessionState) {
         session.memory.push(`Extracted: ${action.instruction}`);
         maybeAdvancePlan(session, activeStep);
         activeStep = Math.min(activeStep + 1, session.plan.length - 1);
-
-        if (!checkpointShown && session.companies.length >= 3) {
-          const coverage = fieldCoverage(session.companies);
-          emit(session, {
-            type: "checkpoint",
-            summary: `Found ${session.companies.length} companies. Review before deepening research.`,
-            collected: [
-              `Companies: ${session.companies.map((c) => c.name).join(", ")}`,
-              ...coverage.collected,
-            ],
-            missing: coverage.missing,
-          });
-          emit(session, {
-            type: "status",
-            status: "awaiting_checkpoint",
-            message: "Checkpoint ready",
-          });
-          checkpointShown = true;
-          const command = await waitForControl(session, [
-            "continue_checkpoint",
-            "stop",
-          ]);
-          if (command === "stop") {
-            session.abort = true;
-            emit(session, {
-              type: "status",
-              status: "stopped",
-              message: "Stopped at checkpoint",
-            });
-            await cleanupSession(session);
-            return;
-          }
-          emit(session, {
-            type: "status",
-            status: "running",
-            message: "Continuing from checkpoint",
-          });
-        }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Extraction failed";
         emit(session, {
@@ -598,38 +666,25 @@ async function runAgent(session: SessionState) {
 
     const executed = await executeWithRecovery(session, page, action);
     if (!executed.ok) {
-      session.memory.push(`Failed action ${action.type}: ${executed.detail}`);
-      emit(session, {
-        type: "step_failed",
-        reason: executed.detail,
-        actionLabel: actionPreview(action),
-      });
-      emit(session, {
-        type: "status",
-        status: "awaiting_recovery",
-        message: executed.detail,
-      });
-      const command = await waitForControl(session, [
-        "retry_step",
-        "skip_step",
-        "stop",
-      ]);
-      if (command === "stop") {
-        session.abort = true;
-        emit(session, { type: "status", status: "stopped", message: "Stopped after a failed step" });
-        await cleanupSession(session);
+      if (isNetworkFailure(executed.detail)) {
+        emit(session, {
+          type: "page_observed",
+          url: page.url() || startUrl,
+          title: "Could not load page",
+          screenshot: "",
+          excerpt: networkFailureMessage(executed.detail),
+        });
+        await finish(session, networkFailureMessage(executed.detail));
         return;
       }
-      if (command === "retry_step") {
-        retryAction = action;
-        emit(session, { type: "status", status: "running", message: "Retrying the failed step" });
-        continue;
-      }
+      session.memory.push(`Skipped failed ${action.type}: ${executed.detail}`);
       emit(session, {
-        type: "decision",
-        message: "Skipped this step after retries. Trying another approach.",
+        type: "retry",
+        attempt: session.retries + 1,
+        reason: executed.detail.split("Call log")[0]?.trim().slice(0, 180) || executed.detail,
+        strategy: "Skipped this failed action and continued",
       });
-      emit(session, { type: "status", status: "running" });
+      emit(session, { type: "status", status: "running", message: "Continuing after a missed action" });
       continue;
     }
 
@@ -691,7 +746,7 @@ async function runAgent(session: SessionState) {
       try {
         await page.goto(searchUrl(searchQueryFromGoal(session.goal), "wiki"), {
           waitUntil: "domcontentloaded",
-          timeout: 30000,
+          timeout: 15000,
         });
         session.pagesVisited += 1;
         observation = await observePage(page);
@@ -713,6 +768,275 @@ async function runAgent(session: SessionState) {
   await finish(session, "Reached step limit; compiling the best available research.");
 }
 
+function sameCompanyHost(a: string, b: string) {
+  const host = (url: string) => {
+    try {
+      return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+    } catch {
+      return "";
+    }
+  };
+  const left = host(a);
+  const right = host(b);
+  if (!left || !right) return false;
+  return left === right || left.endsWith(`.${right}`) || right.endsWith(`.${left}`);
+}
+
+function bindExtractToHost(
+  session: SessionState,
+  observation: { url: string; title: string },
+  companies: CompanyResearch[]
+): CompanyResearch[] {
+  const seed = session.companies.find((company) => {
+    const site = officialSiteForName(company.name);
+    return Boolean(site && sameCompanyHost(site, observation.url));
+  });
+  if (!seed) return companies;
+  const site = officialSiteForName(seed.name) || observation.url;
+  const match =
+    companies.find((company) => {
+      const a = company.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const b = seed.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+      return a === b || a.includes(b) || b.includes(a);
+    }) || companies[0];
+  if (!match) {
+    return [
+      {
+        name: seed.name,
+        website: site,
+        sources: [{ title: observation.title, url: observation.url }],
+      },
+    ];
+  }
+  return [
+    {
+      ...match,
+      name: seed.name,
+      website: site,
+      sources: [...(match.sources || []), { title: observation.title, url: observation.url }],
+    },
+  ];
+}
+
+function stampSeedWebsite(session: SessionState, url: string, title?: string) {
+  if (isWikiUrl(url) || isBlockedUrl(url)) return;
+  session.companies = session.companies.map((company) => {
+    const site = officialSiteForName(company.name);
+    if (!site || !sameCompanyHost(site, url)) return company;
+    const sources = [...(company.sources || [])];
+    if (!sources.some((source) => source.url === url)) {
+      sources.push({ title: title || company.name, url });
+    }
+    return {
+      ...company,
+      website: company.website && !isWikiUrl(company.website) ? company.website : url.split("#")[0],
+      sources,
+    };
+  });
+}
+
+function wikiTitleName(observation: Awaited<ReturnType<typeof observePage>>) {
+  return observation.title.replace(/\s*[-–].*$/, "").trim();
+}
+
+function skipCompany(session: SessionState, name: string) {
+  const key = name.toLowerCase();
+  if (key && !session.skippedNames.includes(key)) session.skippedNames.push(key);
+}
+
+function nextUnverifiedName(session: SessionState): string | undefined {
+  return session.companies.find((c) => {
+    if (isFamousAiLab(c.name, session.goal)) return false;
+    if (isJunkCompanyName(c.name) || isIncumbentVendor(c.name) || isOpenSourceErp(c.name)) {
+      return false;
+    }
+    if (session.skippedNames.includes(c.name.toLowerCase())) return false;
+    const site = officialSiteForName(c.name);
+    const onOfficial =
+      Boolean(c.website && !isWikiUrl(c.website) && (!site || sameCompanyHost(c.website, site)));
+    const hasFacts = Boolean(c.product || c.pricing || c.targetCustomer);
+    return !onOfficial || !hasFacts;
+  })?.name;
+}
+
+function nextOfficialUrl(session: SessionState, currentUrl?: string): string | undefined {
+  const pending = nextUnverifiedName(session);
+  const pendingSite = pending ? officialSiteForName(pending) : undefined;
+  if (pendingSite && !sameCompanyHost(pendingSite, currentUrl || "")) return pendingSite;
+  for (const company of session.companies) {
+    const site = officialSiteForName(company.name);
+    if (!site) continue;
+    if (session.skippedNames.includes(company.name.toLowerCase())) continue;
+    if (sameCompanyHost(site, currentUrl || "")) continue;
+    const hasFacts = Boolean(company.product || company.pricing || company.targetCustomer);
+    if (!hasFacts) return site;
+  }
+  return undefined;
+}
+
+function nextWikiSearch(session: SessionState, currentUrl?: string): string {
+  const queries = wikiQueriesForGoal(session.goal);
+  for (let i = 0; i < queries.length; i++) {
+    const url = searchUrl(queries[session.queryIndex % queries.length], "wiki");
+    session.queryIndex += 1;
+    if (url !== currentUrl) return url;
+  }
+  return searchUrl("accounting software", "wiki");
+}
+
+async function pickFastAction(
+  session: SessionState,
+  observation: Awaited<ReturnType<typeof observePage>> | null
+): Promise<AgentAction | null> {
+  if (!observation) {
+    const first = nextUnverifiedName(session);
+    const firstSite = first ? officialSiteForName(first) : undefined;
+    return {
+      type: "navigate",
+      url: firstSite || nextWikiSearch(session),
+      explanation: firstSite
+        ? `Open ${first}'s official website`
+        : "Open Wikipedia search for the goal",
+    };
+  }
+  const pending = nextUnverifiedName(session);
+  const pendingSite = pending ? officialSiteForName(pending) : undefined;
+  const deadCompanyPage =
+    (isDeadPage(observation) || isBrokenPage(observation)) && !isWikiUrl(observation.url);
+  if (
+    !deadCompanyPage &&
+    (isDeadPage(observation) ||
+      isBlockedUrl(observation.url) ||
+      isOffTopicPage(observation, session.goal) ||
+      isBrokenPage(observation) ||
+      isUselessWikiPage(observation))
+  ) {
+    return {
+      type: "navigate",
+      url: pendingSite || nextWikiSearch(session, observation.url),
+      explanation: pending
+        ? `Left an off-topic page and opening ${pending}'s site`
+        : "Left an off-topic page",
+    };
+  }
+  if (isWikipediaSearchPage(observation) || isMissingWikipediaArticle(observation)) {
+    if (pendingSite) {
+      return {
+        type: "navigate",
+        url: pendingSite,
+        explanation: `Open ${pending}'s official website`,
+      };
+    }
+    return {
+      type: "click",
+      selector: ".mw-search-result-heading a",
+      explanation: "Open the most relevant Wikipedia result",
+    };
+  }
+  if (isWikipediaListPage(observation) && pendingSite && pending) {
+    return {
+      type: "navigate",
+      url: pendingSite,
+      explanation: `Open ${pending}'s official website`,
+    };
+  }
+  if (
+    observation.url.includes("wikipedia.org/wiki/") &&
+    !isWikipediaListPage(observation)
+  ) {
+    const articleName = wikiTitleName(observation);
+    if (isIncumbentVendor(articleName) || isOpenSourceErp(articleName)) {
+      skipCompany(session, articleName);
+      return {
+        type: "navigate",
+        url: pendingSite || nextWikiSearch(session, observation.url),
+        explanation: `Skipped ${articleName}. Opening the next official website.`,
+      };
+    }
+    const mapped = officialSiteForName(articleName) || pendingSite;
+    if (
+      session.extractedUrls.includes(observation.url) &&
+      !session.officialOpened.includes(observation.url)
+    ) {
+      const href = session.page ? await findOfficialWebsiteHref(session.page) : null;
+      const target =
+        (href && !isIncumbentHost(href) && !isBlockedUrl(href) && href) || mapped;
+      session.officialOpened.push(observation.url);
+      if (target) {
+        return {
+          type: "navigate",
+          url: target,
+          explanation: `Open the official website: ${target}`,
+        };
+      }
+      skipCompany(session, articleName);
+      return {
+        type: "navigate",
+        url: pendingSite || nextWikiSearch(session, observation.url),
+        explanation: `No official website on ${articleName}; trying the next company`,
+      };
+    }
+  }
+  if (!isWikiUrl(observation.url) && session.extractedUrls.includes(observation.url)) {
+    const origin = originOf(observation.url);
+    if (origin) {
+      const pricing = `${origin}/pricing`;
+      const careers = `${origin}/careers`;
+      if (!session.probedOrigins.includes(pricing)) {
+        session.probedOrigins.push(pricing);
+        return {
+          type: "navigate",
+          url: pricing,
+          explanation: "Open pricing on the official site",
+        };
+      }
+      if (!session.probedOrigins.includes(careers)) {
+        session.probedOrigins.push(careers);
+        return {
+          type: "navigate",
+          url: careers,
+          explanation: "Open careers on the official site",
+        };
+      }
+    }
+  }
+  if (pendingSite && !sameCompanyHost(observation.url, pendingSite)) {
+    return {
+      type: "navigate",
+      url: pendingSite,
+      explanation: `Open ${pending}'s official website`,
+    };
+  }
+  const usable = companiesWithOfficialSites(session).filter(
+    (c) => c.product || c.pricing || c.targetCustomer
+  );
+  if (usable.length >= 3 && !nextUnverifiedName(session)) {
+    return {
+      type: "done",
+      summary: "Compiling the comparison from pages already visited.",
+    };
+  }
+  const nextSite = nextOfficialUrl(session, observation.url);
+  if (nextSite) {
+    return {
+      type: "navigate",
+      url: nextSite,
+      explanation: "Open the next official company website",
+    };
+  }
+  if (usable.length >= 1) {
+    return {
+      type: "done",
+      summary: "Compiling the comparison from official sites already opened.",
+    };
+  }
+  return {
+    type: "navigate",
+    url: nextWikiSearch(session, observation.url),
+    explanation: "No official site left; Wikipedia search is last resort only",
+  };
+}
+
 async function extractCurrentPage(
   session: SessionState,
   observation: Awaited<ReturnType<typeof observePage>>,
@@ -721,6 +1045,33 @@ async function extractCurrentPage(
   if (session.extractedUrls.includes(observation.url)) return;
   session.extractedUrls.push(observation.url);
   if (isBrokenPage(observation) || isMissingWikipediaArticle(observation)) return;
+  if (isOffTopicPage(observation, session.goal)) return;
+  if (isDeadPage(observation) || isBlockedUrl(observation.url)) return;
+  if (isUselessWikiPage(observation)) return;
+
+  if (observation.url.includes("wikipedia.org")) {
+    if (isWikipediaListPage(observation) && session.page) {
+      try {
+        const wikiNames = await scrapeWikiCompanyNames(session.page);
+        const fromWiki = wikiNames
+          .filter(
+            (name) =>
+              !isFamousAiLab(name, session.goal) &&
+              !isJunkCompanyName(name) &&
+              !isIncumbentVendor(name) &&
+              !isOpenSourceErp(name)
+          )
+          .map((name) => ({
+            name,
+            sources: [{ title: observation.title, url: observation.url }],
+          }));
+        session.companies = mergeCompanies(session.companies, fromWiki);
+      } catch {
+        // keep seeded lookups
+      }
+    }
+    return;
+  }
 
   try {
     const extracted = await extractFromPage({
@@ -728,7 +1079,14 @@ async function extractCurrentPage(
       instruction,
       observation,
     });
-    session.companies = mergeCompanies(session.companies, extracted.companies);
+    const bound = bindExtractToHost(session, observation, extracted.companies);
+    session.companies = mergeCompanies(session.companies, bound).filter(
+      (c) =>
+        !isFamousAiLab(c.name, session.goal) &&
+        !isJunkCompanyName(c.name) &&
+        !isIncumbentVendor(c.name) &&
+        !isOpenSourceErp(c.name)
+    );
     if (extracted.insights) session.memory.push(extracted.insights);
     emit(session, {
       type: "extraction",
@@ -761,6 +1119,7 @@ function emitObservation(
   if (observation.url && !session.visitedUrls.includes(observation.url)) {
     session.visitedUrls.push(observation.url);
   }
+  stampSeedWebsite(session, observation.url, observation.title);
   emit(session, {
     type: "page_observed",
     url: observation.url,
@@ -784,15 +1143,19 @@ async function executeWithRecovery(
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const result = await executeAction(page, action);
+      if (!result.ok && action.type === "click") {
+        return result;
+      }
       return result;
     } catch (error) {
       lastDetail = error instanceof Error ? error.message : "Action failed";
       session.retries += 1;
+      if (isNetworkFailure(lastDetail)) {
+        return { ok: false, detail: lastDetail };
+      }
 
       let strategy = "Retrying the same action";
       if (action.type === "click") {
-        const opened = await openRelevantWikiResult(page, topicKeywords(session.goal));
-        if (opened) return opened;
         const keywords = action.selector
           .replace(/^text=/, "")
           .split(/\s+/)
@@ -874,8 +1237,15 @@ async function finish(session: SessionState, summaryHint: string) {
   }
 
   if (verified.length === 0) {
-    summary =
-      "Research finished without verified company rows. Search engines blocked the browser, and Wikipedia did not yield official company pages the agent could extract from. No invented companies were added.";
+    if (/internet|DNS|could not load/i.test(summaryHint)) {
+      summary = summaryHint;
+    } else if (session.pagesVisited === 0) {
+      summary =
+        "Research stopped before any page loaded. The automated browser could not reach the web. Confirm internet access, restart the app, then try New research.";
+    } else {
+      summary =
+        "Finished without official-site rows. Wikipedia-only names are not shown — the comparison table only includes companies whose own websites were opened. Run New research and watch the live browser leave Wikipedia for company sites.";
+    }
   }
 
   const sourcesChecked = new Set(

@@ -113,7 +113,7 @@ export function useAgentSession() {
         case "page_observed":
           return {
             ...prev,
-            screenshot: event.screenshot,
+            screenshot: event.screenshot || prev.screenshot,
             pageUrl: event.url,
             pageTitle: event.title,
             pageExcerpt: event.excerpt,
@@ -148,12 +148,11 @@ export function useAgentSession() {
         case "checkpoint":
           return {
             ...prev,
-            checkpoint: {
-              summary: event.summary,
-              collected: event.collected,
-              missing: event.missing,
-            },
-            status: "awaiting_checkpoint",
+            activity: pushActivity(prev.activity, {
+              kind: "status",
+              title: "Checkpoint",
+              detail: event.summary,
+            }),
           };
         case "step_failed":
           return {
@@ -228,55 +227,105 @@ export function useAgentSession() {
         statusMessage: "Starting agent…",
       });
 
-      const res = await fetch("/api/agent/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
+      try {
+        const res = await fetch("/api/agent/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ goal }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setState((prev) => ({
+            ...prev,
+            status: "error",
+            error: data.error || `Could not start the agent (${res.status}). Restart npm run dev.`,
+          }));
+          return;
+        }
+
+        const sessionId = data.sessionId as string;
+        if (!sessionId) {
+          setState((prev) => ({
+            ...prev,
+            status: "error",
+            error: "The server did not return a session id. Restart npm run dev.",
+          }));
+          return;
+        }
+        setState((prev) => ({ ...prev, sessionId }));
+
+        const streamRes = await fetch(
+          `/api/agent/stream?sessionId=${encodeURIComponent(sessionId)}`,
+          { headers: { Accept: "text/event-stream" }, cache: "no-store" }
+        );
+        if (!streamRes.ok || !streamRes.body) {
+          let message = `Live stream failed (${streamRes.status}). Restart npm run dev, then New research.`;
+          try {
+            const body = await streamRes.json();
+            if (body.error) message = body.error;
+          } catch {
+            // keep default
+          }
+          setState((prev) => ({
+            ...prev,
+            status: "error",
+            error: message,
+            statusMessage: "Could not connect to the agent",
+          }));
+          return;
+        }
+
+        const reader = streamRes.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        void (async () => {
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const chunks = buffer.split("\n\n");
+              buffer = chunks.pop() || "";
+              for (const chunk of chunks) {
+                const line = chunk.split("\n").find((entry) => entry.startsWith("data: "));
+                if (!line) continue;
+                const event = JSON.parse(line.slice(6)) as
+                  | AgentEvent
+                  | { type: "connected" };
+                if (event.type === "connected") continue;
+                handleEvent(event as AgentEvent);
+                const terminal =
+                  event.type === "completed" ||
+                  event.type === "error" ||
+                  (event.type === "status" &&
+                    (event.status === "stopped" || event.status === "error"));
+                if (terminal) {
+                  await reader.cancel().catch(() => undefined);
+                  return;
+                }
+              }
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Stream closed";
+            if (/abort/i.test(message)) return;
+            setState((prev) => {
+              if (prev.status === "completed" || prev.status === "stopped") return prev;
+              return {
+                ...prev,
+                status: "error",
+                error: "Lost the live agent stream. Click New research.",
+              };
+            });
+          }
+        })();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to start";
         setState((prev) => ({
           ...prev,
           status: "error",
-          error: data.error || "Failed to start",
+          error: message,
         }));
-        return;
       }
-
-      const sessionId = data.sessionId as string;
-      setState((prev) => ({ ...prev, sessionId }));
-
-      const source = new EventSource(
-        `/api/agent/stream?sessionId=${encodeURIComponent(sessionId)}`
-      );
-      sourceRef.current = source;
-      let reachedTerminal = false;
-      const closeStream = () => {
-        source.close();
-        if (sourceRef.current === source) sourceRef.current = null;
-      };
-
-      source.onmessage = (msg) => {
-        try {
-          const event = JSON.parse(msg.data) as AgentEvent | { type: "connected" };
-          if (event.type === "connected") return;
-          handleEvent(event as AgentEvent);
-          const terminal =
-            event.type === "completed" ||
-            event.type === "error" ||
-            (event.type === "status" &&
-              (event.status === "stopped" || event.status === "error"));
-          if (terminal) {
-            reachedTerminal = true;
-            closeStream();
-          }
-        } catch {
-          // ignore malformed chunks
-        }
-      };
-      source.onerror = () => {
-        if (reachedTerminal) closeStream();
-      };
     },
     [handleEvent]
   );

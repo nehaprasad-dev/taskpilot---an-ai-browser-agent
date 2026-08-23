@@ -7,20 +7,23 @@ type Props = {
   excerpt?: string;
 };
 
-function looksEmpty(excerpt?: string, screenshot?: string) {
-  if (!screenshot) return true;
+function looksEmpty(excerpt?: string, screenshot?: string, url?: string) {
+  if (url?.includes("wikipedia.org")) return false;
+  if (!screenshot) return false;
   const text = (excerpt || "").toLowerCase();
   return (
     text.includes("if this persists") ||
     text.includes("anonymized error code") ||
     text.includes("solve the challenge") ||
-    text.includes("one last step") ||
-    text.trim().length < 30
+    text.includes("one last step")
   );
 }
 
 export function BrowserPreview({ screenshot, url, title, excerpt }: Props) {
-  const blocked = looksEmpty(excerpt, screenshot);
+  const blocked = looksEmpty(excerpt, screenshot, url);
+  const loadFailed =
+    title === "Could not load page" ||
+    Boolean(excerpt && /internet|DNS|could not load/i.test(excerpt));
 
   return (
     <section className="panel browser-panel">
@@ -44,18 +47,25 @@ export function BrowserPreview({ screenshot, url, title, excerpt }: Props) {
         <div className="browser-viewport">
           {screenshot ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={screenshot} alt={title || "Current browser page"} />
+            <img
+              key={url || screenshot.slice(-24)}
+              src={screenshot}
+              alt={title || "Current browser page"}
+            />
           ) : (
             <div className="browser-empty">
-              <p>The agent&apos;s viewport will appear here as it navigates.</p>
+              <p>
+                {loadFailed
+                  ? excerpt || "The browser could not load this page."
+                  : "The agent's viewport will appear here as it navigates."}
+              </p>
             </div>
           )}
-          {blocked && url ? (
+          {blocked && url && screenshot ? (
             <div className="browser-blocked">
               <p>
-                This page did not render useful content (search engines often
-                block automated browsers). The agent will move to Wikipedia and
-                company sites instead.
+                This page did not render useful content. The agent will leave it
+                and try Wikipedia or an official site instead.
               </p>
             </div>
           ) : null}

@@ -20,7 +20,7 @@ export function mergeCompanies(
 
     map.set(key, {
       name: prev.name || company.name,
-      website: prefer(prev.website, company.website),
+      website: preferUrl(prev.website, company.website),
       product: prefer(prev.product, company.product),
       targetCustomer: prefer(prev.targetCustomer, company.targetCustomer),
       pricing: prefer(prev.pricing, company.pricing),
@@ -41,9 +41,17 @@ function normalizeName(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function preferUrl(a?: string, b?: string) {
+  const wiki = (url?: string) => Boolean(url && /wikipedia\.org|wikimedia\.org/i.test(url));
+  if (a && !wiki(a) && a.toLowerCase() !== "not found") return a;
+  if (b && !wiki(b) && b.toLowerCase() !== "not found") return b;
+  return prefer(a, b);
+}
+
 function prefer(a?: string, b?: string) {
-  if (a && a.toLowerCase() !== "not found") return a;
-  return b || a;
+  if (a && a.toLowerCase() !== "not found" && !isChromeText(a)) return a;
+  if (b && b.toLowerCase() !== "not found" && !isChromeText(b)) return b;
+  return undefined;
 }
 
 function dedupeSources(sources: { title: string; url: string }[]) {
@@ -65,16 +73,43 @@ export function hostOf(url: string): string {
   }
 }
 
-function isJunkCompanyName(name: string) {
+export function isJunkCompanyName(name: string) {
   const n = name.toLowerCase().trim();
+  if (n.length < 3) return true;
+  if (
+    /^(accounting|bookkeeping|finance|software|wikipedia|search|contents|article|company|startup|startups|product|pricing|careers|sage 50|sage50|peachtree)$/i.test(
+      n
+    )
+  ) {
+    return true;
+  }
+  if (n.includes("sage 50") || n === "sage group") return true;
+  if (
+    /adempiere|ofbiz|gnucash|compiere|sql-?ledger|apache|gnu cash|openbravo|tryton|postbooks/.test(
+      n
+    )
+  ) {
+    return true;
+  }
   return (
-    n.length < 2 ||
-    n.includes("startup us") ||
+    n.includes("anthropic") ||
+    n.includes("openai") ||
+    n.includes("softbank") ||
+    n.includes("deepseek") ||
     n.includes("does not exist") ||
     n.includes("wikipedia") ||
     n.includes("search results") ||
+    n.includes("jump to content") ||
     n === "ai accounting" ||
     /^list of /.test(n)
+  );
+}
+
+export function isChromeText(value?: string) {
+  if (!value) return false;
+  const t = value.toLowerCase();
+  return /jump to content|main menu|appearance|create account|log in|toggle the table of contents|original author|programming language|java 1\.|postgresql|mysql|mw-parser|infobox|wikipedia/.test(
+    t
   );
 }
 
@@ -94,13 +129,31 @@ export function filterVerifiedCompanies(
       const sources = (company.sources || []).filter((source) =>
         visitedHost(visitedUrls, source.url)
       );
+      const officialSources = sources.filter(
+        (source) => !/wikipedia\.org|wikimedia\.org/i.test(source.url)
+      );
+      const websiteCandidate =
+        company.website && !/wikipedia\.org|wikimedia\.org/i.test(company.website)
+          ? company.website.startsWith("http")
+            ? company.website
+            : `https://${company.website}`
+          : officialSources[0]?.url;
       const website =
-        company.website && visitedHost(visitedUrls, company.website.startsWith("http") ? company.website : `https://${company.website}`)
-          ? company.website
-          : sources[0]?.url;
-      return { ...company, sources, website };
+        websiteCandidate && visitedHost(visitedUrls, websiteCandidate)
+          ? websiteCandidate
+          : officialSources[0]?.url;
+      return {
+        ...company,
+        sources: officialSources,
+        website,
+        product: isChromeText(company.product) ? undefined : company.product,
+      };
     })
-    .filter((company) => company.sources.length > 0);
+    .filter(
+      (company) =>
+        company.sources.length > 0 &&
+        !/adempiere|ofbiz|gnucash|compiere|apache/i.test(company.name)
+    );
 }
 
 export function fieldCoverage(companies: CompanyResearch[]) {

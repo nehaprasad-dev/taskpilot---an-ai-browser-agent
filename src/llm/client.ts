@@ -1,6 +1,8 @@
 import OpenAI from "openai";
 import { z } from "zod";
 import type { AgentAction, CompanyResearch, PageObservation, PlanStep } from "@/agent/types";
+import { isJunkCompanyName } from "@/agent/recovery";
+import { isIncumbentVendor, isOpenSourceErp } from "@/browser/policy";
 
 const actionSchema = z.discriminatedUnion("type", [
   z.object({
@@ -149,16 +151,15 @@ ${schemaHint}`,
     { role: "user" as const, content: user },
   ];
 
-  const attempts: Array<{ jsonMode: boolean }> = process.env.GROQ_API_KEY
-    ? [{ jsonMode: false }, { jsonMode: true }]
-    : [{ jsonMode: true }, { jsonMode: false }];
+  const attempts: Array<{ jsonMode: boolean }> = [{ jsonMode: false }];
 
   let lastError: unknown;
   for (const attempt of attempts) {
     try {
       const response = await client.chat.completions.create({
         model: getModel(),
-        temperature: 0.2,
+        temperature: 0,
+        max_tokens: 700,
         ...(attempt.jsonMode ? { response_format: { type: "json_object" as const } } : {}),
         messages,
       });
@@ -183,8 +184,9 @@ ${schemaHint}`,
 
 export async function createPlan(goal: string): Promise<PlanStep[]> {
   const raw = await chatJson<{ steps: { id: string; label: string }[] }>(
-    `You are ResearchPilot's planner. Create a concise multi-step research plan for a browser agent.
-Keep 5-8 steps. Prefer verifying facts on company websites.`,
+    `You are ResearchPilot's planner. Write 5-6 short browser steps.
+Use Wikipedia search, Wikipedia articles, then official company websites.
+Never mention Crunchbase, PitchBook, AngelList, Google, Bing, LinkedIn, or Twitter — they block this browser.`,
     `Goal: ${goal}`,
     `{ "steps": [{ "id": "step-1", "label": "..." }] }`
   );
@@ -233,11 +235,14 @@ ${input.observation.interactiveElements
     `You are ResearchPilot, an autonomous browser research agent.
 Choose ONE next action to progress the goal.
 
-Stay on-topic for the user's goal (for accounting/AI research: accounting software, bookkeeping, invoicing — never conglomerates like SoftBank unless the goal names them).
-If you are on Wikipedia search results, click a result whose title matches the topic, then EXTRACT, then open the Official website link in the infobox.
-Never use Bing, Google, or DuckDuckGo — they block automated browsers.
-Never invent a company list from memory. Only extract names that appear on the current page.
-If a Wikipedia article does not exist, click a listed search result that matches the topic.
+Stay on-topic for the user's goal. For accounting/AI research that means accounting software, bookkeeping, invoicing — never Manus, SoftBank, ChatGPT, DeepSeek, or unrelated news headlines.
+Never click a selector longer than a short link label. Never click "See also" news blurbs.
+If you are on Wikipedia search results, click a result whose title matches accounting/software/startup, then EXTRACT, then open Official website.
+Never navigate to TechCrunch, Crunchbase, news articles, Google, or Bing. Only Wikipedia and official company websites.
+If the current page is a 404, go to Wikipedia search immediately.
+Never invent a company list from memory.
+If a click target is missing, navigate to Wikipedia search instead of retrying the same click.
+Use done only after at least 3 companies have official (non-Wikipedia) websites opened. Never finish from Wikipedia alone. Never treat Sage 50, Accounting, or Software as a company.
 
 Use company websites to verify product, pricing, customers, and careers. Click pricing/careers/about when those links exist.
 Use extract when the current page itself contains company facts.
@@ -305,9 +310,11 @@ export async function extractFromPage(input: {
   }
 
   const raw = await chatJson<z.infer<typeof extractSchema>>(
-    `Extract ONLY facts that appear in the page text below.
-Do not use prior knowledge. Do not invent companies, funding, jobs, or URLs.
-If the page is a failed search or says the article does not exist, return { "companies": [], "insights": "Nothing extractable" }.
+    `Extract ONLY named companies or products that appear in the page text.
+Do not extract the topic word "Accounting" or "Software" as a company.
+Do not copy Wikipedia chrome (Jump to content, Main menu, Search).
+Do not invent funding, jobs, or URLs.
+If this page is a general topic (Accounting, Bookkeeping, Sage 50) return { "companies": [] }.
 If a field is not on the page, omit it.
 sourceUrl must be exactly the page URL you were given.`,
     `Goal: ${input.goal}
@@ -322,8 +329,11 @@ ${input.observation.excerpt}`,
   const parsed = extractSchema.parse(raw);
   const excerpt = input.observation.excerpt.toLowerCase();
   let companies: CompanyResearch[] = parsed.companies
-    .filter((c) => c.name && !/startup us|does not exist|softbank/i.test(c.name))
+    .filter((c) => c.name && !isJunkCompanyName(c.name) && !isIncumbentVendor(c.name))
     .map((c) => {
+      const chrome = /jump to content|main menu|create account|log in/i.test(
+        `${c.product || ""} ${c.notes || ""}`
+      );
       const fundingOnPage =
         Boolean(c.funding) &&
         (excerpt.includes("$") ||
@@ -338,8 +348,10 @@ ${input.observation.excerpt}`,
           excerpt.includes("job"));
       return {
         name: c.name,
-        website: c.website,
-        product: c.product,
+        website: c.website || (!/wikipedia\.org|wikimedia\.org/i.test(input.observation.url)
+          ? input.observation.url
+          : undefined),
+        product: chrome ? undefined : c.product,
         targetCustomer: c.targetCustomer,
         pricing:
           c.pricing && (excerpt.includes("$") || excerpt.includes("pricing") || excerpt.includes("plan"))
@@ -368,7 +380,9 @@ function wikipediaTitleFallback(observation: PageObservation): CompanyResearch[]
   if (!/wikipedia\.org\/wiki\//i.test(observation.url)) return [];
   if (/Special:|Wikipedia:|Help:|File:|Template:|Portal:/i.test(observation.url)) return [];
   const name = observation.title.replace(/\s*[-–]\s*Wikipedia.*$/i, "").trim();
-  if (!name || /search results|does not exist|softbank/i.test(name)) return [];
+  if (!name || isJunkCompanyName(name) || isIncumbentVendor(name) || isOpenSourceErp(name) || /search results|does not exist/i.test(name)) return [];
+  if (/\/wiki\/(Accounting|Bookkeeping|Finance|Sage_50|Sage_Group|Comparison_|List_of_|Microsoft|ADempiere|Apache_OFBiz|GnuCash)/i.test(observation.url))
+    return [];
   const blob = `${observation.title} ${observation.excerpt}`;
   if (!/account|bookkeep|invoic|ledger|software|startup|automat|financ|erp|cpa/i.test(blob)) {
     return [];
