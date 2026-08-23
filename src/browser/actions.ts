@@ -16,13 +16,60 @@ function isJunkClick(selector: string): boolean {
   );
 }
 
-export async function openFirstOrganicResult(
-  page: Page
+const SKIP_WIKI =
+  /softbank|main_page|special:|wikipedia:|help:|file:|talk:|template:|portal:|disambiguation/i;
+
+export async function openRelevantWikiResult(
+  page: Page,
+  keywords: string[]
 ): Promise<{ ok: boolean; detail: string } | null> {
   const href = await page
+    .evaluate((keys) => {
+      const skip =
+        /softbank|main_page|special:|wikipedia:|help:|file:|talk:|template:|portal:/i;
+      const anchors = Array.from(
+        document.querySelectorAll(
+          ".mw-search-result-heading a[href^='/wiki/'], .mw-search-results a[href^='/wiki/']"
+        )
+      ) as HTMLAnchorElement[];
+      const scored = anchors
+        .map((anchor) => {
+          const href = anchor.href;
+          const text = `${anchor.textContent || ""} ${href}`.toLowerCase();
+          if (!href || skip.test(href) || skip.test(text)) return null;
+          const score = keys.reduce(
+            (sum, key) => sum + (text.includes(key.toLowerCase()) ? 2 : 0),
+            0
+          );
+          const bonus =
+            /account|bookkeep|software|startup|invoic|ledger|automat/.test(text)
+              ? 3
+              : 0;
+          return { href, score: score + bonus };
+        })
+        .filter((item): item is { href: string; score: number } => Boolean(item))
+        .sort((a, b) => b.score - a.score);
+      return scored.find((item) => item.score > 0)?.href || null;
+    }, keywords)
+    .catch(() => null);
+
+  if (!href || SKIP_WIKI.test(href)) return null;
+  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.waitForTimeout(500);
+  return { ok: true, detail: `Opened Wikipedia result: ${href}` };
+}
+
+export async function openFirstOrganicResult(
+  page: Page,
+  keywords: string[] = []
+): Promise<{ ok: boolean; detail: string } | null> {
+  const relevant = await openRelevantWikiResult(page, keywords);
+  if (relevant) return relevant;
+
+  const href = await page
     .evaluate(() => {
-      const blocked =
-        /duckduckgo\.com|bing\.com|microsoft\.com|google\.com\/search|javascript:|privacy|feedback|accessibility/i;
+      const skip =
+        /softbank|duckduckgo\.com|bing\.com|microsoft\.com|google\.com\/search|javascript:|privacy|feedback|accessibility|special:|wikipedia:/i;
       const links = Array.from(document.querySelectorAll("a[href]"));
       for (const link of links) {
         let href = link.getAttribute("href") || "";
@@ -36,7 +83,7 @@ export async function openFirstOrganicResult(
           // keep href
         }
         if (!href.startsWith("http")) continue;
-        if (blocked.test(href) || blocked.test(text)) continue;
+        if (skip.test(href) || skip.test(text)) continue;
         if (text.length < 2) continue;
         return href;
       }
@@ -44,10 +91,38 @@ export async function openFirstOrganicResult(
     })
     .catch(() => null);
 
-  if (!href) return null;
+  if (!href || SKIP_WIKI.test(href)) return null;
   await page.goto(href, { waitUntil: "domcontentloaded", timeout: 30000 });
   await page.waitForTimeout(500);
-  return { ok: true, detail: `Opened first search result: ${href}` };
+  return { ok: true, detail: `Opened search result: ${href}` };
+}
+
+export async function openOfficialWebsite(
+  page: Page
+): Promise<{ ok: boolean; detail: string } | null> {
+  const href = await page
+    .evaluate(() => {
+      const labeled = Array.from(
+        document.querySelectorAll(".infobox a.external, a.external")
+      ) as HTMLAnchorElement[];
+      for (const link of labeled) {
+        const context = `${link.textContent || ""} ${link.closest("tr")?.innerText || ""}`.toLowerCase();
+        const href = link.href;
+        if (!href.startsWith("http")) continue;
+        if (/wikipedia\.org|wikimedia|web.archive|isbn|doi.org/.test(href)) continue;
+        if (/official|website|homepage|url/.test(context) || labeled.length === 1) {
+          return href;
+        }
+      }
+      return labeled.find((link) => /^https?:/.test(link.href) && !/wikipedia/.test(link.href))
+        ?.href || null;
+    })
+    .catch(() => null);
+
+  if (!href) return null;
+  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.waitForTimeout(600);
+  return { ok: true, detail: `Opened official website: ${href}` };
 }
 
 async function fillField(
@@ -96,10 +171,19 @@ export async function executeAction(
       return { ok: true, detail: `Navigated to ${url}` };
     }
     case "click": {
-      if (isJunkClick(action.selector)) {
-        const opened = await openFirstOrganicResult(page);
+      if (isJunkClick(action.selector) || /mw-search-result/i.test(action.selector)) {
+        const opened = await openRelevantWikiResult(page, [
+          "accounting",
+          "software",
+          "startup",
+          "bookkeep",
+          "invoice",
+          "ai",
+        ]);
         if (opened) return opened;
-        return { ok: false, detail: `Skipped junk click: ${action.selector}` };
+        if (isJunkClick(action.selector)) {
+          return { ok: false, detail: `Skipped junk click: ${action.selector}` };
+        }
       }
       const selector = resolveSelector(action.selector);
       const locator = page.locator(selector).first();

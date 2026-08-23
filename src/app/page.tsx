@@ -19,7 +19,9 @@ export default function HomePage() {
     <main className="app-shell">
       <header className="topbar">
         <div className="topbar__brand">
-          <span className="topbar__mark" aria-hidden />
+          <span className="topbar__mark" aria-hidden>
+            ›
+          </span>
           <span>ResearchPilot</span>
         </div>
         <div className={`topbar__status topbar__status--${state.status}`}>
@@ -38,7 +40,7 @@ export default function HomePage() {
             {state.error ? <p className="error-banner">{state.error}</p> : null}
           </div>
 
-          <div className="control-room__grid">
+          <div className="workspace">
             <PlanPanel steps={state.plan} />
             <BrowserPreview
               screenshot={state.screenshot}

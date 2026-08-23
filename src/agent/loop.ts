@@ -2,6 +2,7 @@ import { nanoid } from "nanoid";
 import type { BrowserContext, Page } from "playwright";
 import { EventBus } from "@/lib/events";
 import type {
+  AgentAction,
   AgentControlCommand,
   AgentEvent,
   AgentStatus,
@@ -10,9 +11,22 @@ import type {
   ResearchResult,
 } from "@/agent/types";
 import { createSessionContext } from "@/browser/browser";
-import { executeAction, findAlternativeClickTarget, findSearchField, openFirstOrganicResult } from "@/browser/actions";
+import {
+  executeAction,
+  findAlternativeClickTarget,
+  findSearchField,
+  openOfficialWebsite,
+  openRelevantWikiResult,
+} from "@/browser/actions";
 import { observePage } from "@/browser/observer";
-import { isBrokenPage, queryFromGoal, searchUrl } from "@/browser/search";
+import {
+  isBrokenPage,
+  isMissingWikipediaArticle,
+  isWikipediaSearchPage,
+  searchQueryFromGoal,
+  searchUrl,
+  topicKeywords,
+} from "@/browser/search";
 import {
   createPlan,
   decideNextAction,
@@ -21,7 +35,7 @@ import {
 } from "@/llm/client";
 import { fieldCoverage, filterVerifiedCompanies, mergeCompanies } from "@/agent/recovery";
 
-const MAX_STEPS = 28;
+const MAX_STEPS = 36;
 const MAX_RETRIES = 3;
 
 type SessionState = {
@@ -44,6 +58,7 @@ type SessionState = {
   abort: boolean;
   visitedUrls: string[];
   armApproveNext: boolean;
+  extractedUrls: string[];
 };
 
 const sessions = new Map<string, SessionState>();
@@ -186,6 +201,7 @@ export async function startAgentSession(goal: string) {
     abort: false,
     visitedUrls: [],
     armApproveNext: false,
+    extractedUrls: [],
   };
   sessions.set(id, session);
 
@@ -240,13 +256,69 @@ async function runAgent(session: SessionState) {
   session.context = context;
   session.page = page;
 
-  emit(session, { type: "status", status: "running", message: "Agent running" });
+  emit(session, { type: "status", status: "running", message: "Opening a Wikipedia search for this goal" });
   if (session.plan[0]) {
     updatePlanStatus(session, (_s, i) => i === 0, "active");
   }
 
-  let activeStep = 0;
   let observation = null as Awaited<ReturnType<typeof observePage>> | null;
+  const startUrl = searchUrl(searchQueryFromGoal(session.goal), "wiki");
+  emit(session, {
+    type: "decision",
+    message: `Starting on Wikipedia search: ${startUrl}`,
+  });
+  emit(session, {
+    type: "action_started",
+    action: {
+      type: "navigate",
+      url: startUrl,
+      explanation: "Open Wikipedia search results for the goal",
+    },
+  });
+  try {
+    await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    session.pagesVisited += 1;
+    observation = await observePage(page);
+    emitObservation(session, observation);
+    const keywords = topicKeywords(session.goal);
+    if (
+      isWikipediaSearchPage(observation) ||
+      isMissingWikipediaArticle(observation) ||
+      isBrokenPage(observation)
+    ) {
+      const opened = await openRelevantWikiResult(page, keywords);
+      if (opened) {
+        emit(session, {
+          type: "decision",
+          message: opened.detail,
+        });
+        observation = await observePage(page);
+        emitObservation(session, observation);
+      }
+    }
+    if (observation) {
+      await extractCurrentPage(session, observation, "Read the opening page for companies and facts");
+    }
+    emit(session, {
+      type: "action_completed",
+      action: {
+        type: "navigate",
+        url: startUrl,
+        explanation: "Wikipedia search opened",
+      },
+      detail: `On ${observation?.url || startUrl}`,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Could not open Wikipedia search";
+    emit(session, {
+      type: "retry",
+      attempt: 1,
+      reason: message,
+      strategy: "The model will try another URL next",
+    });
+  }
+
+  let activeStep = 0;
   let checkpointShown = false;
   let retryAction: Awaited<ReturnType<typeof decideNextAction>> | null = null;
 
@@ -257,20 +329,33 @@ async function runAgent(session: SessionState) {
       return;
     }
 
-    let action;
+    let action: AgentAction;
     if (retryAction) {
       action = retryAction;
       retryAction = null;
     } else {
       try {
-        action = await decideNextAction({
-          goal: session.goal,
-          plan: session.plan,
-          observation,
-          memory: session.memory.slice(-8).join("\n"),
-          companies: session.companies,
-          stepIndex: activeStep,
-        });
+        if (
+          observation &&
+          !session.extractedUrls.includes(observation.url) &&
+          !isBrokenPage(observation) &&
+          !isMissingWikipediaArticle(observation)
+        ) {
+          action = {
+            type: "extract",
+            instruction: "Extract companies and facts that appear on this page.",
+            explanation: "Reading the current page before choosing the next click",
+          };
+        } else {
+          action = await decideNextAction({
+            goal: session.goal,
+            plan: session.plan,
+            observation,
+            memory: session.memory.slice(-8).join("\n"),
+            companies: session.companies,
+            stepIndex: activeStep,
+          });
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Model response was invalid";
         session.retries += 1;
@@ -278,13 +363,34 @@ async function runAgent(session: SessionState) {
           type: "retry",
           attempt: session.retries,
           reason: message,
-          strategy: "Asking the model again with a simpler JSON request",
+          strategy: "Continuing with a page-based fallback instead of stopping",
         });
-        if (session.retries >= MAX_RETRIES * 3) {
-          await finish(session, "Stopped after repeated model-format failures. Compiling what was collected.");
+        if (observation && isWikipediaSearchPage(observation)) {
+          const opened = await openRelevantWikiResult(page, topicKeywords(session.goal));
+          if (opened) {
+            observation = await observePage(page);
+            emitObservation(session, observation);
+          }
+          continue;
+        }
+        if (observation?.url.includes("wikipedia.org/wiki/")) {
+          const opened = await openOfficialWebsite(page);
+          if (opened) {
+            emit(session, { type: "decision", message: opened.detail });
+            observation = await observePage(page);
+            emitObservation(session, observation);
+            continue;
+          }
+        }
+        if (session.retries >= MAX_RETRIES * 4 || session.companies.length >= 3) {
+          await finish(session, "Compiling verified rows after the model stopped returning valid actions.");
           return;
         }
-        continue;
+        action = {
+          type: "extract",
+          instruction: "Extract any company names and facts visible on this page.",
+          explanation: "Fallback: extract from the current page",
+        };
       }
     }
 
@@ -335,7 +441,7 @@ async function runAgent(session: SessionState) {
       emit(session, {
         type: "approval_required",
         reason: action.reason,
-        actionPreview: action.proposedAction,
+        actionPreview: action.proposedAction ?? action.reason,
       });
       emit(session, {
         type: "status",
@@ -368,8 +474,8 @@ async function runAgent(session: SessionState) {
       emit(session, {
         type: "checkpoint",
         summary: action.summary,
-        collected: action.collected,
-        missing: action.missing,
+        collected: action.collected ?? [],
+        missing: action.missing ?? [],
       });
       emit(session, {
         type: "status",
@@ -414,6 +520,9 @@ async function runAgent(session: SessionState) {
         }
       }
       try {
+        if (!session.extractedUrls.includes(observation.url)) {
+          session.extractedUrls.push(observation.url);
+        }
         const extracted = await extractFromPage({
           goal: session.goal,
           instruction: action.instruction,
@@ -554,6 +663,17 @@ async function runAgent(session: SessionState) {
     if (observation.url !== previousUrl) {
       session.pagesVisited += 1;
     }
+    if (isMissingWikipediaArticle(observation) || isWikipediaSearchPage(observation)) {
+      const opened = await openRelevantWikiResult(page, topicKeywords(session.goal));
+      if (opened) {
+        emit(session, {
+          type: "decision",
+          message: opened.detail,
+        });
+        observation = await observePage(page);
+        emitObservation(session, observation);
+      }
+    }
 
     if (
       (action.type === "navigate" ||
@@ -562,15 +682,14 @@ async function runAgent(session: SessionState) {
         action.type === "click") &&
       isBrokenPage(observation)
     ) {
-      const fallback = searchUrl(queryFromGoal(session.goal), "wiki");
       emit(session, {
         type: "retry",
         attempt: 1,
         reason: "Search engine blocked the automated browser (blank error page).",
-        strategy: "Opening Wikipedia instead, where pages actually load",
+        strategy: "Opening Wikipedia search for this goal instead",
       });
       try {
-        await page.goto(searchUrl(queryFromGoal(session.goal), "wiki"), {
+        await page.goto(searchUrl(searchQueryFromGoal(session.goal), "wiki"), {
           waitUntil: "domcontentloaded",
           timeout: 30000,
         });
@@ -579,7 +698,7 @@ async function runAgent(session: SessionState) {
         emitObservation(session, observation);
         session.memory.push(`Moved to Wikipedia: ${observation.url}`);
       } catch {
-        session.memory.push(`Could not open Wikipedia fallback ${fallback}`);
+        session.memory.push("Could not open Wikipedia search fallback");
       }
     }
 
@@ -592,6 +711,47 @@ async function runAgent(session: SessionState) {
   }
 
   await finish(session, "Reached step limit; compiling the best available research.");
+}
+
+async function extractCurrentPage(
+  session: SessionState,
+  observation: Awaited<ReturnType<typeof observePage>>,
+  instruction: string
+) {
+  if (session.extractedUrls.includes(observation.url)) return;
+  session.extractedUrls.push(observation.url);
+  if (isBrokenPage(observation) || isMissingWikipediaArticle(observation)) return;
+
+  try {
+    const extracted = await extractFromPage({
+      goal: session.goal,
+      instruction,
+      observation,
+    });
+    session.companies = mergeCompanies(session.companies, extracted.companies);
+    if (extracted.insights) session.memory.push(extracted.insights);
+    emit(session, {
+      type: "extraction",
+      data: extracted.companies,
+      label: instruction,
+    });
+    emit(session, {
+      type: "decision",
+      message:
+        extracted.companies.length > 0
+          ? `Extracted ${extracted.companies.map((c) => c.name).join(", ")} from this page.`
+          : "This page had no extractable company rows.",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Extract failed";
+    session.retries += 1;
+    emit(session, {
+      type: "retry",
+      attempt: session.retries,
+      reason: message,
+      strategy: "Will try another page next",
+    });
+  }
 }
 
 function emitObservation(
@@ -631,7 +791,7 @@ async function executeWithRecovery(
 
       let strategy = "Retrying the same action";
       if (action.type === "click") {
-        const opened = await openFirstOrganicResult(page);
+        const opened = await openRelevantWikiResult(page, topicKeywords(session.goal));
         if (opened) return opened;
         const keywords = action.selector
           .replace(/^text=/, "")

@@ -15,10 +15,9 @@ export function AgentInput({ disabled, onStart }: Props) {
   return (
     <section className="goal-panel">
       <div className="goal-panel__copy">
-        <p className="eyebrow">Observable browser research</p>
-        <h1 className="brand">ResearchPilot</h1>
+        <h1 className="brand">The smartest way to research the web.</h1>
         <p className="lede">
-          Give it a research goal. Watch it plan, browse, recover, and compile a
+          Give it a goal. Watch it plan, browse, recover, and compile a
           source-backed comparison you can steer at every step.
         </p>
       </div>
