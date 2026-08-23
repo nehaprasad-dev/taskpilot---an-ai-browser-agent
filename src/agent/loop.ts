@@ -10,7 +10,7 @@ import type {
   ResearchResult,
 } from "@/agent/types";
 import { createSessionContext } from "@/browser/browser";
-import { executeAction, findAlternativeClickTarget, findSearchField } from "@/browser/actions";
+import { executeAction, findAlternativeClickTarget, findSearchField, openFirstOrganicResult } from "@/browser/actions";
 import { observePage } from "@/browser/observer";
 import { isBrokenPage, queryFromGoal, searchUrl } from "@/browser/search";
 import {
@@ -19,7 +19,7 @@ import {
   extractFromPage,
   synthesizeReport,
 } from "@/llm/client";
-import { fieldCoverage, mergeCompanies } from "@/agent/recovery";
+import { fieldCoverage, filterVerifiedCompanies, mergeCompanies } from "@/agent/recovery";
 
 const MAX_STEPS = 28;
 const MAX_RETRIES = 3;
@@ -42,6 +42,7 @@ type SessionState = {
   controlWaiters: Array<(command: AgentControlCommand) => void>;
   pendingCommand?: AgentControlCommand;
   abort: boolean;
+  visitedUrls: string[];
   armApproveNext: boolean;
 };
 
@@ -183,6 +184,7 @@ export async function startAgentSession(goal: string) {
     createdAt: Date.now(),
     controlWaiters: [],
     abort: false,
+    visitedUrls: [],
     armApproveNext: false,
   };
   sessions.set(id, session);
@@ -397,8 +399,19 @@ async function runAgent(session: SessionState) {
 
     if (action.type === "extract") {
       if (!observation) {
-        observation = await observePage(page);
-        emitObservation(session, observation);
+        try {
+          observation = await observePage(page);
+          emitObservation(session, observation);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Could not read the page";
+          emit(session, {
+            type: "retry",
+            attempt: 1,
+            reason: message,
+            strategy: "Will wait and extract after the next navigation",
+          });
+          continue;
+        }
       }
       try {
         const extracted = await extractFromPage({
@@ -518,7 +531,25 @@ async function runAgent(session: SessionState) {
     });
 
     const previousUrl = observation?.url;
-    observation = await observePage(page);
+    try {
+      observation = await observePage(page);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not read the page";
+      session.retries += 1;
+      emit(session, {
+        type: "retry",
+        attempt: session.retries,
+        reason: message,
+        strategy: "Waiting for the page to finish loading, then continuing",
+      });
+      await page.waitForTimeout(800);
+      try {
+        observation = await observePage(page);
+      } catch {
+        session.memory.push(`Could not snapshot ${page.url()}: ${message}`);
+        continue;
+      }
+    }
     emitObservation(session, observation);
     if (observation.url !== previousUrl) {
       session.pagesVisited += 1;
@@ -531,26 +562,24 @@ async function runAgent(session: SessionState) {
         action.type === "click") &&
       isBrokenPage(observation)
     ) {
-      const fallback = searchUrl(queryFromGoal(session.goal), "bing");
-      session.memory.push(
-        `Page looked broken (${observation.url}). Next, try ${fallback} or fill a search box.`
-      );
+      const fallback = searchUrl(queryFromGoal(session.goal), "wiki");
       emit(session, {
         type: "retry",
         attempt: 1,
-        reason: `The page at ${observation.url} did not load useful content.`,
-        strategy: `Falling back to Bing search or filling a search field`,
+        reason: "Search engine blocked the automated browser (blank error page).",
+        strategy: "Opening Wikipedia instead, where pages actually load",
       });
-      const searchField = await findSearchField(page);
-      if (!searchField && action.type === "navigate") {
-        try {
-          await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 30000 });
-          session.pagesVisited += 1;
-          observation = await observePage(page);
-          emitObservation(session, observation);
-        } catch {
-          // leave observation as-is; model will decide next
-        }
+      try {
+        await page.goto(searchUrl(queryFromGoal(session.goal), "wiki"), {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        });
+        session.pagesVisited += 1;
+        observation = await observePage(page);
+        emitObservation(session, observation);
+        session.memory.push(`Moved to Wikipedia: ${observation.url}`);
+      } catch {
+        session.memory.push(`Could not open Wikipedia fallback ${fallback}`);
       }
     }
 
@@ -569,6 +598,9 @@ function emitObservation(
   session: SessionState,
   observation: Awaited<ReturnType<typeof observePage>>
 ) {
+  if (observation.url && !session.visitedUrls.includes(observation.url)) {
+    session.visitedUrls.push(observation.url);
+  }
   emit(session, {
     type: "page_observed",
     url: observation.url,
@@ -596,14 +628,11 @@ async function executeWithRecovery(
     } catch (error) {
       lastDetail = error instanceof Error ? error.message : "Action failed";
       session.retries += 1;
-      emit(session, {
-        type: "status",
-        status: "recovering",
-        message: lastDetail,
-      });
 
       let strategy = "Retrying the same action";
-      if (action.type === "click" && attempt === 2) {
+      if (action.type === "click") {
+        const opened = await openFirstOrganicResult(page);
+        if (opened) return opened;
         const keywords = action.selector
           .replace(/^text=/, "")
           .split(/\s+/)
@@ -617,7 +646,7 @@ async function executeWithRecovery(
           "jobs",
           "about",
         ]);
-        if (alt) {
+        if (alt && !/accessibility|feedback|cookie/i.test(alt)) {
           strategy = `Trying alternative selector: ${alt}`;
           action = { ...action, selector: alt };
         }
@@ -641,7 +670,7 @@ async function executeWithRecovery(
       emit(session, {
         type: "retry",
         attempt,
-        reason: lastDetail,
+        reason: lastDetail.split("Call log")[0]?.trim().slice(0, 160) || "Click timed out",
         strategy,
       });
     }
@@ -658,38 +687,47 @@ async function finish(session: SessionState, summaryHint: string) {
     message: "Compiling structured report",
   });
 
-  session.plan = session.plan.map((step) =>
-    step.status === "pending" || step.status === "active"
-      ? { ...step, status: "done" }
-      : step
-  );
+  session.plan = session.plan.map((step) => {
+    if (step.status === "active") return { ...step, status: "done" };
+    if (step.status === "pending") return { ...step, status: "skipped" };
+    return step;
+  });
   emit(session, { type: "plan_updated", steps: session.plan });
 
+  const verified = filterVerifiedCompanies(session.companies, session.visitedUrls);
+  session.companies = verified;
+
   let summary = summaryHint;
-  let companies = session.companies;
   try {
     const synthesized = await synthesizeReport({
       goal: session.goal,
-      companies: session.companies,
+      companies: verified,
       pagesVisited: session.pagesVisited,
       retries: session.retries,
     });
     summary = synthesized.summary || summaryHint;
-    companies = synthesized.companies;
   } catch {
-    summary = summaryHint;
+    summary =
+      verified.length === 0
+        ? "Research finished, but no company facts could be verified from pages the agent actually opened."
+        : summaryHint;
+  }
+
+  if (verified.length === 0) {
+    summary =
+      "Research finished without verified company rows. Search engines blocked the browser, and Wikipedia did not yield official company pages the agent could extract from. No invented companies were added.";
   }
 
   const sourcesChecked = new Set(
-    companies.flatMap((c) => c.sources.map((s) => s.url))
+    verified.flatMap((c) => c.sources.map((s) => s.url))
   ).size;
 
   const result: ResearchResult = {
     goal: session.goal,
-    companies,
+    companies: verified,
     summary,
     stats: {
-      companiesResearched: companies.length,
+      companiesResearched: verified.length,
       sourcesChecked,
       pagesVisited: session.pagesVisited,
       retries: session.retries,

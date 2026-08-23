@@ -4,9 +4,24 @@ type Props = {
   screenshot?: string;
   url?: string;
   title?: string;
+  excerpt?: string;
 };
 
-export function BrowserPreview({ screenshot, url, title }: Props) {
+function looksEmpty(excerpt?: string, screenshot?: string) {
+  if (!screenshot) return true;
+  const text = (excerpt || "").toLowerCase();
+  return (
+    text.includes("if this persists") ||
+    text.includes("anonymized error code") ||
+    text.includes("solve the challenge") ||
+    text.includes("one last step") ||
+    text.trim().length < 30
+  );
+}
+
+export function BrowserPreview({ screenshot, url, title, excerpt }: Props) {
+  const blocked = looksEmpty(excerpt, screenshot);
+
   return (
     <section className="panel browser-panel">
       <header className="panel__header">
@@ -35,6 +50,15 @@ export function BrowserPreview({ screenshot, url, title }: Props) {
               <p>The agent&apos;s viewport will appear here as it navigates.</p>
             </div>
           )}
+          {blocked && url ? (
+            <div className="browser-blocked">
+              <p>
+                This page did not render useful content (search engines often
+                block automated browsers). The agent will move to Wikipedia and
+                company sites instead.
+              </p>
+            </div>
+          ) : null}
         </div>
       </div>
     </section>

@@ -28,6 +28,7 @@ export type UiState = {
   screenshot?: string;
   pageUrl?: string;
   pageTitle?: string;
+  pageExcerpt?: string;
   approval?: { reason: string; actionPreview?: string };
   checkpoint?: { summary: string; collected: string[]; missing: string[] };
   recovery?: { reason: string; actionLabel: string };
@@ -115,6 +116,7 @@ export function useAgentSession() {
             screenshot: event.screenshot,
             pageUrl: event.url,
             pageTitle: event.title,
+            pageExcerpt: event.excerpt,
           };
         case "extraction":
           return {
@@ -167,25 +169,30 @@ export function useAgentSession() {
               detail: event.reason,
             }),
           };
-        case "status":
+        case "status": {
+          const noisy =
+            event.status === "recovering" ||
+            event.status === "running" ||
+            (event.message || "").includes("Call log");
           return {
             ...prev,
             status: event.status,
-            statusMessage: event.message,
+            statusMessage: event.message?.split("Call log")[0]?.trim().slice(0, 120),
             approval:
               event.status === "awaiting_approval" ? prev.approval : undefined,
             checkpoint:
               event.status === "awaiting_checkpoint" ? prev.checkpoint : undefined,
             recovery:
               event.status === "awaiting_recovery" ? prev.recovery : undefined,
-            activity: event.message
-              ? pushActivity(prev.activity, {
+            activity: noisy || !event.message
+              ? prev.activity
+              : pushActivity(prev.activity, {
                   kind: "status",
                   title: event.status,
-                  detail: event.message,
-                })
-              : prev.activity,
+                  detail: event.message.split("Call log")[0]?.trim().slice(0, 180),
+                }),
           };
+        }
         case "completed":
           return {
             ...prev,
@@ -202,7 +209,7 @@ export function useAgentSession() {
             activity: pushActivity(prev.activity, {
               kind: "error",
               title: "Error",
-              detail: event.message,
+              detail: event.message.split("Call log")[0]?.trim().slice(0, 180),
             }),
           };
         default:

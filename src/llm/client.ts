@@ -227,24 +227,23 @@ ${input.observation.interactiveElements
   .slice(0, 25)
   .map((el) => `- ${el.tag}: "${el.text}" => ${el.selector}`)
   .join("\n")}`
-    : "No page loaded yet. Navigate to https://html.duckduckgo.com/html/?q=YOUR+QUERY";
+    : "No page loaded yet. Navigate to a Wikipedia search for the user's goal: https://en.wikipedia.org/w/index.php?search=URL_ENCODED_GOAL";
 
   const raw = await chatJson<AgentAction>(
     `You are ResearchPilot, an autonomous browser research agent.
 Choose ONE next action to progress the goal.
 
-If no page is loaded yet, navigate to a search results URL. Prefer:
-https://html.duckduckgo.com/html/?q=YOUR+QUERY
-If that page errors, use:
-https://www.bing.com/search?q=YOUR+QUERY
+If no page is loaded yet, navigate to Wikipedia search for THIS user's goal
+(https://en.wikipedia.org/w/index.php?search=... with keywords from the goal).
+Never use Bing, Google, or DuckDuckGo — they block automated browsers.
+Never invent a company list from memory. Only extract names that appear on the current page, then open official sites from links on that page.
+If a Wikipedia article does not exist, click a listed search result or extract nothing — do not guess startups.
 
-To search from a homepage, FILL the search box (action type "fill") with the query and set pressEnter true. Do not skip filling when a search input is visible.
+To search from a homepage, FILL the search box (action type "fill") with the query and set pressEnter true.
 
 Use company websites to verify product, pricing, customers, and careers. Click pricing/careers/about when those links exist.
-Use extract when the page has useful company facts.
-Use checkpoint after a company shortlist.
-Use ask_human only for logins, purchases, or job applications.
-Use done when you have enough verified structured data for a useful comparison.
+Use extract when the current page itself contains company facts. Do not extract from empty or failed-search pages.
+Use done only after extracting from real pages you opened. If you have nothing verified, still call done rather than inventing rows.
 Explanations must be short, user-facing decision notes — never private chain-of-thought.`,
     `Goal: ${input.goal}
 
@@ -275,41 +274,70 @@ export async function extractFromPage(input: {
   companies: CompanyResearch[];
   insights?: string;
 }> {
+  const pageLooksEmpty =
+    /does not exist|if this persists|no results matching/i.test(
+      `${input.observation.title} ${input.observation.excerpt}`
+    );
+  if (pageLooksEmpty) {
+    return { companies: [], insights: "This page has no extractable company facts." };
+  }
+
   const raw = await chatJson<z.infer<typeof extractSchema>>(
-    `Extract structured research facts from the page text.
-Only include facts supported by the page. Use uncertain wording when unclear.
-If the page lists multiple companies, return multiple entries.`,
+    `Extract ONLY facts that appear in the page text below.
+Do not use prior knowledge. Do not invent companies, funding, jobs, or URLs.
+If the page is a failed search or says the article does not exist, return { "companies": [], "insights": "Nothing extractable" }.
+If a field is not on the page, omit it.
+sourceUrl must be exactly the page URL you were given.`,
     `Goal: ${input.goal}
 Instruction: ${input.instruction}
 URL: ${input.observation.url}
 Title: ${input.observation.title}
 Page text:
 ${input.observation.excerpt}`,
-    `{ "companies": [{ "name": "", "website": "", "product": "", "targetCustomer": "", "pricing": "", "funding": "", "engineeringOpenings": "", "notes": "", "sourceTitle": "", "sourceUrl": "" }], "insights": "" }`
+    `{ "companies": [{ "name": "", "website": "", "product": "", "targetCustomer": "", "pricing": "", "funding": "", "engineeringOpenings": "", "notes": "" }], "insights": "" }`
   );
 
   const parsed = extractSchema.parse(raw);
+  const excerpt = input.observation.excerpt.toLowerCase();
+
   return {
     insights: parsed.insights,
-    companies: parsed.companies.map((c) => ({
-      name: c.name,
-      website: c.website,
-      product: c.product,
-      targetCustomer: c.targetCustomer,
-      pricing: c.pricing,
-      funding: c.funding,
-      engineeringOpenings: c.engineeringOpenings,
-      notes: c.notes,
-      sources:
-        c.sourceUrl || input.observation.url
-          ? [
-              {
-                title: c.sourceTitle || input.observation.title || "Source",
-                url: c.sourceUrl || input.observation.url,
-              },
-            ]
-          : [],
-    })),
+    companies: parsed.companies
+      .filter((c) => c.name && !/startup us|does not exist/i.test(c.name))
+      .map((c) => {
+        const fundingOnPage =
+          Boolean(c.funding) &&
+          (excerpt.includes("fundn") ||
+            excerpt.includes("$") ||
+            excerpt.includes("funding") ||
+            excerpt.includes("million") ||
+            excerpt.includes("series"));
+        const jobsOnPage =
+          Boolean(c.engineeringOpenings) &&
+          (excerpt.includes("engineer") ||
+            excerpt.includes("career") ||
+            excerpt.includes("hiring") ||
+            excerpt.includes("job"));
+        return {
+          name: c.name,
+          website: c.website,
+          product: c.product,
+          targetCustomer: c.targetCustomer,
+          pricing:
+            c.pricing && (excerpt.includes("$") || excerpt.includes("pricing") || excerpt.includes("plan"))
+              ? c.pricing
+              : undefined,
+          funding: fundingOnPage ? c.funding : undefined,
+          engineeringOpenings: jobsOnPage ? c.engineeringOpenings : undefined,
+          notes: c.notes,
+          sources: [
+            {
+              title: input.observation.title || "Source",
+              url: input.observation.url,
+            },
+          ],
+        };
+      }),
   };
 }
 
@@ -319,19 +347,28 @@ export async function synthesizeReport(input: {
   pagesVisited: number;
   retries: number;
 }): Promise<{ summary: string; companies: CompanyResearch[] }> {
-  const raw = await chatJson<{ summary: string; companies: CompanyResearch[] }>(
-    `Create a polished final research brief. Keep company facts concise. Fill gaps with "Not found" rather than inventing.`,
+  if (input.companies.length === 0) {
+    return {
+      summary:
+        "No verified company rows. Only pages the agent actually opened are allowed as sources, and none yielded a company the agent could confirm.",
+      companies: [],
+    };
+  }
+
+  const raw = await chatJson<{ summary: string }>(
+    `Write a 2-4 sentence summary of the verified research only.
+Do not add companies, numbers, jobs, or URLs that are not in the JSON.
+If a field is missing, say it was not found on the visited pages.`,
     `Goal: ${input.goal}
-Companies JSON:
+Visited pages: ${input.pagesVisited}
+Retries: ${input.retries}
+Verified companies JSON:
 ${JSON.stringify(input.companies, null, 2)}`,
-    `{ "summary": "...", "companies": [{ "name": "", "website": "", "product": "", "targetCustomer": "", "pricing": "", "funding": "", "engineeringOpenings": "", "sources": [{"title":"","url":""}], "notes": "" }] }`
+    `{ "summary": "..." }`
   );
 
   return {
     summary: raw.summary,
-    companies: (raw.companies || input.companies).map((c) => ({
-      ...c,
-      sources: c.sources || [],
-    })),
+    companies: input.companies,
   };
 }

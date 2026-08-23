@@ -44,6 +44,7 @@ export default function HomePage() {
               screenshot={state.screenshot}
               url={state.pageUrl}
               title={state.pageTitle}
+              excerpt={state.pageExcerpt}
             />
           </div>
 

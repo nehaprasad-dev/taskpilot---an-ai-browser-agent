@@ -426,6 +426,7 @@ textarea {
   display: flex;
   align-items: stretch;
   justify-content: center;
+  position: relative;
 }
 
 .browser-viewport img {
@@ -442,6 +443,23 @@ textarea {
   place-items: center;
   padding: 2rem;
   text-align: center;
+}
+
+.browser-blocked {
+  position: absolute;
+  left: 1rem;
+  right: 1rem;
+  bottom: 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  background: rgba(19, 32, 25, 0.88);
+  color: #f7f3ea;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.browser-blocked p {
+  margin: 0;
 }
 
 .activity-panel {

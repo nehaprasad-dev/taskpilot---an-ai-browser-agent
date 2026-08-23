@@ -57,6 +57,52 @@ function dedupeSources(sources: { title: string; url: string }[]) {
   return out;
 }
 
+export function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isJunkCompanyName(name: string) {
+  const n = name.toLowerCase().trim();
+  return (
+    n.length < 2 ||
+    n.includes("startup us") ||
+    n.includes("does not exist") ||
+    n.includes("wikipedia") ||
+    n.includes("search results") ||
+    n === "ai accounting" ||
+    /^list of /.test(n)
+  );
+}
+
+function visitedHost(visitedUrls: string[], url: string) {
+  const host = hostOf(url);
+  if (!host) return false;
+  return visitedUrls.some((visited) => hostOf(visited) === host);
+}
+
+export function filterVerifiedCompanies(
+  companies: CompanyResearch[],
+  visitedUrls: string[]
+): CompanyResearch[] {
+  return companies
+    .filter((company) => company.name && !isJunkCompanyName(company.name))
+    .map((company) => {
+      const sources = (company.sources || []).filter((source) =>
+        visitedHost(visitedUrls, source.url)
+      );
+      const website =
+        company.website && visitedHost(visitedUrls, company.website.startsWith("http") ? company.website : `https://${company.website}`)
+          ? company.website
+          : sources[0]?.url;
+      return { ...company, sources, website };
+    })
+    .filter((company) => company.sources.length > 0);
+}
+
 export function fieldCoverage(companies: CompanyResearch[]) {
   const fields = [
     "website",
