@@ -140,22 +140,25 @@ async function waitForControl(
   session: SessionState,
   expected: AgentControlCommand[]
 ): Promise<AgentControlCommand> {
-  if (session.pendingCommand && expected.includes(session.pendingCommand)) {
-    const command = session.pendingCommand;
-    session.pendingCommand = undefined;
-    return command;
-  }
+  for (;;) {
+    if (session.pendingCommand && expected.includes(session.pendingCommand)) {
+      const command = session.pendingCommand;
+      session.pendingCommand = undefined;
+      return command;
+    }
 
-  return new Promise((resolve) => {
-    session.controlWaiters.push((command) => {
-      if (expected.includes(command)) {
-        resolve(command);
-      } else {
-        session.pendingCommand = command;
-        resolve(command);
-      }
+    const command = await new Promise<AgentControlCommand>((resolve) => {
+      session.controlWaiters.push(resolve);
     });
-  });
+
+    if (expected.includes(command)) {
+      return command;
+    }
+
+    // Queue unexpected commands (e.g. pause during approval) without treating them
+    // as approve/continue/skip.
+    session.pendingCommand = command;
+  }
 }
 
 async function respectPause(session: SessionState) {
