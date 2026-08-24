@@ -2,12 +2,17 @@
 
 import type { ResearchResult } from "@/agent/types";
 
+function Cell({ value }: { value?: string }) {
+  if (!value) return <span className="cell-empty">Not found</span>;
+  return <>{value}</>;
+}
+
 export function ResearchTable({ result }: { result: ResearchResult }) {
   return (
     <section className="panel results-panel">
-      <header className="panel__header">
+      <header className="panel__header results-header">
         <div>
-          <h2>Research completed</h2>
+          <h2>Research complete</h2>
           <p className="muted">{result.summary}</p>
         </div>
         <div className="stats-row">
@@ -59,11 +64,21 @@ export function ResearchTable({ result }: { result: ResearchResult }) {
                       ) : null}
                     </div>
                   </td>
-                  <td>{company.product || "Not found"}</td>
-                  <td>{company.targetCustomer || "Not found"}</td>
-                  <td>{company.pricing || "Not found"}</td>
-                  <td>{company.funding || "Not found"}</td>
-                  <td>{company.engineeringOpenings || "Not found"}</td>
+                  <td>
+                    <Cell value={company.product} />
+                  </td>
+                  <td>
+                    <Cell value={company.targetCustomer} />
+                  </td>
+                  <td>
+                    <Cell value={company.pricing} />
+                  </td>
+                  <td>
+                    <Cell value={company.funding} />
+                  </td>
+                  <td>
+                    <Cell value={company.engineeringOpenings} />
+                  </td>
                   <td>
                     <div className="source-list">
                       {company.sources.length ? (
@@ -78,7 +93,7 @@ export function ResearchTable({ result }: { result: ResearchResult }) {
                           </a>
                         ))
                       ) : (
-                        <span className="muted">—</span>
+                        <span className="cell-empty">—</span>
                       )}
                     </div>
                   </td>

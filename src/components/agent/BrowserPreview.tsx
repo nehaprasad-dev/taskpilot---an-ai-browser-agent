@@ -29,20 +29,29 @@ export function BrowserPreview({ screenshot, url, title, excerpt }: Props) {
     <section className="panel browser-panel">
       <header className="panel__header">
         <h2>Live browser</h2>
-        {url ? (
-          <a className="browser-url" href={url} target="_blank" rel="noreferrer">
-            {title ? `${title} · ` : ""}
-            {url}
-          </a>
-        ) : (
-          <span className="muted">No page yet</span>
-        )}
+        {title ? <span className="panel__meta">{title}</span> : null}
       </header>
       <div className="browser-frame">
-        <div className="browser-chrome" aria-hidden>
-          <span />
-          <span />
-          <span />
+        <div className="browser-chrome">
+          <span className="browser-chrome__dots" aria-hidden>
+            <i />
+            <i />
+            <i />
+          </span>
+          {url ? (
+            <a
+              className="browser-chrome__url"
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {url}
+            </a>
+          ) : (
+            <span className="browser-chrome__url browser-chrome__url--empty">
+              about:blank
+            </span>
+          )}
         </div>
         <div className="browser-viewport">
           {screenshot ? (

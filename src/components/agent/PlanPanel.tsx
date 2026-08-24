@@ -11,25 +11,34 @@ const STATUS_GLYPH: Record<PlanStep["status"], string> = {
 };
 
 export function PlanPanel({ steps }: { steps: PlanStep[] }) {
+  const done = steps.filter((step) => step.status === "done").length;
+
   return (
     <section className="panel plan-panel">
       <header className="panel__header">
         <h2>Plan</h2>
+        {steps.length ? (
+          <span className="panel__meta">
+            {done}/{steps.length}
+          </span>
+        ) : null}
       </header>
-      {steps.length === 0 ? (
-        <p className="muted">Waiting for the agent to draft a plan…</p>
-      ) : (
-        <ol className="plan-list">
-          {steps.map((step) => (
-            <li key={step.id} className={`plan-item plan-item--${step.status}`}>
-              <span className="plan-item__glyph" aria-hidden>
-                {STATUS_GLYPH[step.status]}
-              </span>
-              <span>{step.label}</span>
-            </li>
-          ))}
-        </ol>
-      )}
+      <div className="panel__body">
+        {steps.length === 0 ? (
+          <p className="muted">Waiting for the agent to draft a plan…</p>
+        ) : (
+          <ol className="plan-list">
+            {steps.map((step) => (
+              <li key={step.id} className={`plan-item plan-item--${step.status}`}>
+                <span className="plan-item__glyph" aria-hidden>
+                  {STATUS_GLYPH[step.status]}
+                </span>
+                <span>{step.label}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
     </section>
   );
 }

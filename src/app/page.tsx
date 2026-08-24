@@ -16,31 +16,30 @@ export default function HomePage() {
   const showControlRoom = state.status !== "idle";
 
   return (
-    <main className="app-shell">
+    <div className={`app ${showControlRoom ? "app--live" : "app--landing"}`}>
       <header className="topbar">
         <div className="topbar__brand">
-          <span className="topbar__mark" aria-hidden>
-            ›
-          </span>
-          <span>ResearchPilot</span>
+          <span className="topbar__mark" aria-hidden />
+          <span className="topbar__name">ResearchPilot</span>
+          <span className="topbar__tag">Observable browser agent</span>
         </div>
         <div className={`topbar__status topbar__status--${state.status}`}>
           <span className="topbar__dot" />
-          {state.statusMessage || state.status}
+          {state.statusMessage || (showControlRoom ? state.status : "Ready")}
         </div>
       </header>
 
       {!showControlRoom ? (
         <AgentInput onStart={start} />
       ) : (
-        <div className="control-room">
-          <div className="control-room__goal">
+        <main className="room">
+          <section className="room__goal">
             <p className="eyebrow">Active goal</p>
-            <p>{state.goal}</p>
+            <p className="room__goal-text">{state.goal}</p>
             {state.error ? <p className="error-banner">{state.error}</p> : null}
-          </div>
+          </section>
 
-          <div className="workspace">
+          <section className="room__grid">
             <PlanPanel steps={state.plan} />
             <BrowserPreview
               screenshot={state.screenshot}
@@ -48,11 +47,14 @@ export default function HomePage() {
               title={state.pageTitle}
               excerpt={state.pageExcerpt}
             />
-          </div>
+            <ActivityFeed items={state.activity} />
+          </section>
 
-          <ActivityFeed items={state.activity} />
-
-          {state.result ? <ResearchTable result={state.result} /> : null}
+          {state.result ? (
+            <section className="room__results">
+              <ResearchTable result={state.result} />
+            </section>
+          ) : null}
 
           {(state.approval || state.checkpoint || state.recovery) && (
             <div className="overlay">
@@ -84,18 +86,20 @@ export default function HomePage() {
               ) : null}
             </div>
           )}
-
-          <ControlBar
-            status={state.status}
-            isLive={isLive}
-            onPause={() => control("pause")}
-            onResume={() => control("resume")}
-            onStop={() => control("stop")}
-            onApproveNext={() => control("arm_approve_next")}
-            onReset={reset}
-          />
-        </div>
+        </main>
       )}
-    </main>
+
+      {showControlRoom ? (
+        <ControlBar
+          status={state.status}
+          isLive={isLive}
+          onPause={() => control("pause")}
+          onResume={() => control("resume")}
+          onStop={() => control("stop")}
+          onApproveNext={() => control("arm_approve_next")}
+          onReset={reset}
+        />
+      ) : null}
+    </div>
   );
 }
