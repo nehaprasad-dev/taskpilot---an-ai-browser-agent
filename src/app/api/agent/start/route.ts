@@ -13,6 +13,12 @@ export async function POST(request: Request) {
     if (!goal) {
       return NextResponse.json({ error: "Goal is required" }, { status: 400 });
     }
+    if (goal.length > 1200) {
+      return NextResponse.json(
+        { error: "Goal is too long. Keep it under 1,200 characters." },
+        { status: 400 }
+      );
+    }
     if (!hasLlmKey()) {
       return NextResponse.json(
         {

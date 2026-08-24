@@ -50,7 +50,11 @@ import {
   extractFromPage,
   synthesizeReport,
 } from "@/llm/client";
-import { fieldCoverage, filterVerifiedCompanies, isJunkCompanyName, mergeCompanies } from "@/agent/recovery";
+import {
+  filterVerifiedCompanies,
+  isJunkCompanyName,
+  mergeCompanies,
+} from "@/agent/recovery";
 
 const MAX_STEPS = 36;
 const MAX_RETRIES = 1;
@@ -80,6 +84,8 @@ type SessionState = {
   queryIndex: number;
   probedOrigins: string[];
   skippedNames: string[];
+  lastNavigationTarget?: string;
+  repeatedNavigationCount: number;
 };
 
 const globalStore = globalThis as typeof globalThis & {
@@ -268,6 +274,7 @@ export async function startAgentSession(goal: string) {
     queryIndex: 0,
     probedOrigins: [],
     skippedNames: [],
+    repeatedNavigationCount: 0,
   };
   sessions.set(id, session);
 
@@ -497,6 +504,35 @@ async function runAgent(session: SessionState) {
       message: "explanation" in action ? action.explanation : summarizeAction(action),
     });
 
+    if (action.type === "navigate") {
+      const target = normalizePageUrl(action.url);
+      if (target === session.lastNavigationTarget) {
+        session.repeatedNavigationCount += 1;
+      } else {
+        session.lastNavigationTarget = target;
+        session.repeatedNavigationCount = 0;
+      }
+      if (session.repeatedNavigationCount >= 1) {
+        const alternative = nextUnvisitedOfficialUrl(session, observation?.url);
+        if (alternative && normalizePageUrl(alternative) !== target) {
+          emit(session, {
+            type: "retry",
+            attempt: session.retries + 1,
+            reason: `The agent selected ${action.url} again`,
+            strategy: `Loop prevented; moving to ${alternative}`,
+          });
+          session.retries += 1;
+          action = {
+            type: "navigate",
+            url: alternative,
+            explanation: "Loop prevented — open an unvisited official company site",
+          };
+          session.lastNavigationTarget = normalizePageUrl(alternative);
+          session.repeatedNavigationCount = 0;
+        }
+      }
+    }
+
     const mutating =
       action.type === "navigate" ||
       action.type === "click" ||
@@ -569,8 +605,34 @@ async function runAgent(session: SessionState) {
 
     if (action.type === "checkpoint") {
       emit(session, {
-        type: "decision",
-        message: "Checkpoint noted — continuing so the run does not stall.",
+        type: "checkpoint",
+        summary: action.summary,
+        collected: action.collected,
+        missing: action.missing,
+      });
+      emit(session, {
+        type: "status",
+        status: "awaiting_checkpoint",
+        message: "Review progress before the agent continues",
+      });
+      const command = await waitForControl(session, [
+        "continue_checkpoint",
+        "stop",
+      ]);
+      if (command === "stop") {
+        session.abort = true;
+        emit(session, {
+          type: "status",
+          status: "stopped",
+          message: "Stopped at checkpoint",
+        });
+        await cleanupSession(session);
+        return;
+      }
+      emit(session, {
+        type: "status",
+        status: "running",
+        message: "Checkpoint approved — continuing",
       });
       continue;
     }
@@ -619,9 +681,6 @@ async function runAgent(session: SessionState) {
         }
       }
       try {
-        if (!session.extractedUrls.includes(observation.url)) {
-          session.extractedUrls.push(observation.url);
-        }
         const extracted = await extractFromPage({
           goal: session.goal,
           instruction: action.instruction,
@@ -635,6 +694,9 @@ async function runAgent(session: SessionState) {
             !isIncumbentVendor(c.name) &&
             !isOpenSourceErp(c.name)
         );
+        if (!session.extractedUrls.includes(observation.url)) {
+          session.extractedUrls.push(observation.url);
+        }
         if (extracted.insights) {
           session.memory.push(extracted.insights);
         }
@@ -660,6 +722,9 @@ async function runAgent(session: SessionState) {
           strategy: "Will try another page or selector next",
         });
         session.retries += 1;
+        if (observation && !session.extractedUrls.includes(observation.url)) {
+          session.extractedUrls.push(observation.url);
+        }
       }
       continue;
     }
@@ -677,14 +742,58 @@ async function runAgent(session: SessionState) {
         await finish(session, networkFailureMessage(executed.detail));
         return;
       }
-      session.memory.push(`Skipped failed ${action.type}: ${executed.detail}`);
       emit(session, {
         type: "retry",
         attempt: session.retries + 1,
         reason: executed.detail.split("Call log")[0]?.trim().slice(0, 180) || executed.detail,
-        strategy: "Skipped this failed action and continued",
+        strategy: "Waiting for you to retry, skip, or stop",
       });
-      emit(session, { type: "status", status: "running", message: "Continuing after a missed action" });
+      emit(session, {
+        type: "step_failed",
+        reason:
+          executed.detail.split("Call log")[0]?.trim().slice(0, 180) ||
+          executed.detail,
+        actionLabel: actionPreview(action),
+      });
+      emit(session, {
+        type: "status",
+        status: "awaiting_recovery",
+        message: "Choose how the agent should recover",
+      });
+      const command = await waitForControl(session, [
+        "retry_step",
+        "skip_step",
+        "stop",
+      ]);
+      if (command === "stop") {
+        session.abort = true;
+        emit(session, {
+          type: "status",
+          status: "stopped",
+          message: "Stopped during recovery",
+        });
+        await cleanupSession(session);
+        return;
+      }
+      if (command === "retry_step") {
+        retryAction = action;
+        emit(session, {
+          type: "status",
+          status: "recovering",
+          message: "Retrying the failed action",
+        });
+        continue;
+      }
+      session.memory.push(`Human skipped failed ${action.type}: ${executed.detail}`);
+      emit(session, {
+        type: "decision",
+        message: "Skipped the failed action and continued with the plan.",
+      });
+      emit(session, {
+        type: "status",
+        status: "running",
+        message: "Continuing after the skipped action",
+      });
       continue;
     }
 
@@ -782,6 +891,34 @@ function sameCompanyHost(a: string, b: string) {
   return left === right || left.endsWith(`.${right}`) || right.endsWith(`.${left}`);
 }
 
+function normalizePageUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    const path = parsed.pathname.replace(/\/+$/, "") || "/";
+    return `${parsed.hostname.replace(/^www\./, "").toLowerCase()}${path}`;
+  } catch {
+    return url.toLowerCase().replace(/\/+$/, "");
+  }
+}
+
+function hasVisitedPage(session: SessionState, url: string) {
+  const target = normalizePageUrl(url);
+  return session.visitedUrls.some((visited) => normalizePageUrl(visited) === target);
+}
+
+function nextUnvisitedOfficialUrl(
+  session: SessionState,
+  currentUrl?: string
+): string | undefined {
+  for (const company of session.companies) {
+    const site = officialSiteForName(company.name);
+    if (!site || session.skippedNames.includes(company.name.toLowerCase())) continue;
+    if (sameCompanyHost(site, currentUrl || "")) continue;
+    if (!hasVisitedPage(session, site)) return site;
+  }
+  return undefined;
+}
+
 function bindExtractToHost(
   session: SessionState,
   observation: { url: string; title: string },
@@ -792,6 +929,9 @@ function bindExtractToHost(
     return Boolean(site && sameCompanyHost(site, observation.url));
   });
   if (!seed) return companies;
+  if (/403|404|forbidden|not found|access denied/i.test(observation.title)) {
+    return [];
+  }
   const site = officialSiteForName(seed.name) || observation.url;
   const match =
     companies.find((company) => {
@@ -820,6 +960,7 @@ function bindExtractToHost(
 
 function stampSeedWebsite(session: SessionState, url: string, title?: string) {
   if (isWikiUrl(url) || isBlockedUrl(url)) return;
+  if (/403|404|forbidden|not found|access denied/i.test(title || "")) return;
   session.companies = session.companies.map((company) => {
     const site = officialSiteForName(company.name);
     if (!site || !sameCompanyHost(site, url)) return company;
@@ -860,16 +1001,24 @@ function nextUnverifiedName(session: SessionState): string | undefined {
 }
 
 function nextOfficialUrl(session: SessionState, currentUrl?: string): string | undefined {
+  const unvisited = nextUnvisitedOfficialUrl(session, currentUrl);
+  if (unvisited) return unvisited;
   const pending = nextUnverifiedName(session);
   const pendingSite = pending ? officialSiteForName(pending) : undefined;
-  if (pendingSite && !sameCompanyHost(pendingSite, currentUrl || "")) return pendingSite;
+  if (
+    pendingSite &&
+    !sameCompanyHost(pendingSite, currentUrl || "") &&
+    !hasVisitedPage(session, pendingSite)
+  ) {
+    return pendingSite;
+  }
   for (const company of session.companies) {
     const site = officialSiteForName(company.name);
     if (!site) continue;
     if (session.skippedNames.includes(company.name.toLowerCase())) continue;
     if (sameCompanyHost(site, currentUrl || "")) continue;
     const hasFacts = Boolean(company.product || company.pricing || company.targetCustomer);
-    if (!hasFacts) return site;
+    if (!hasFacts && !hasVisitedPage(session, site)) return site;
   }
   return undefined;
 }
@@ -982,7 +1131,10 @@ async function pickFastAction(
     if (origin) {
       const pricing = `${origin}/pricing`;
       const careers = `${origin}/careers`;
-      if (!session.probedOrigins.includes(pricing)) {
+      if (
+        !session.probedOrigins.includes(pricing) &&
+        !hasVisitedPage(session, pricing)
+      ) {
         session.probedOrigins.push(pricing);
         return {
           type: "navigate",
@@ -990,7 +1142,10 @@ async function pickFastAction(
           explanation: "Open pricing on the official site",
         };
       }
-      if (!session.probedOrigins.includes(careers)) {
+      if (
+        !session.probedOrigins.includes(careers) &&
+        !hasVisitedPage(session, careers)
+      ) {
         session.probedOrigins.push(careers);
         return {
           type: "navigate",
@@ -1043,11 +1198,11 @@ async function extractCurrentPage(
   instruction: string
 ) {
   if (session.extractedUrls.includes(observation.url)) return;
-  session.extractedUrls.push(observation.url);
   if (isBrokenPage(observation) || isMissingWikipediaArticle(observation)) return;
   if (isOffTopicPage(observation, session.goal)) return;
   if (isDeadPage(observation) || isBlockedUrl(observation.url)) return;
   if (isUselessWikiPage(observation)) return;
+  // Mark after the attempt so a failed/empty extract can still be retried once the page settles.
 
   if (observation.url.includes("wikipedia.org")) {
     if (isWikipediaListPage(observation) && session.page) {
@@ -1070,6 +1225,7 @@ async function extractCurrentPage(
         // keep seeded lookups
       }
     }
+    session.extractedUrls.push(observation.url);
     return;
   }
 
@@ -1087,6 +1243,7 @@ async function extractCurrentPage(
         !isIncumbentVendor(c.name) &&
         !isOpenSourceErp(c.name)
     );
+    session.extractedUrls.push(observation.url);
     if (extracted.insights) session.memory.push(extracted.insights);
     emit(session, {
       type: "extraction",
@@ -1103,6 +1260,7 @@ async function extractCurrentPage(
   } catch (error) {
     const message = error instanceof Error ? error.message : "Extract failed";
     session.retries += 1;
+    session.extractedUrls.push(observation.url);
     emit(session, {
       type: "retry",
       attempt: session.retries,

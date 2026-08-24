@@ -148,6 +148,12 @@ export function useAgentSession() {
         case "checkpoint":
           return {
             ...prev,
+            checkpoint: {
+              summary: event.summary,
+              collected: event.collected,
+              missing: event.missing,
+            },
+            status: "awaiting_checkpoint",
             activity: pushActivity(prev.activity, {
               kind: "status",
               title: "Checkpoint",
@@ -333,11 +339,19 @@ export function useAgentSession() {
   const control = useCallback(
     async (command: AgentControlCommand) => {
       if (!state.sessionId) return;
-      await fetch("/api/control", {
+      const response = await fetch("/api/control", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId: state.sessionId, command }),
       });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        setState((prev) => ({
+          ...prev,
+          error: body.error || `Control request failed (${response.status})`,
+        }));
+        return;
+      }
       if (command === "approve" || command === "reject") {
         setState((prev) => ({ ...prev, approval: undefined }));
       }

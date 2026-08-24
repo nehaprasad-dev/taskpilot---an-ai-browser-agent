@@ -130,7 +130,9 @@ export function filterVerifiedCompanies(
         visitedHost(visitedUrls, source.url)
       );
       const officialSources = sources.filter(
-        (source) => !/wikipedia\.org|wikimedia\.org/i.test(source.url)
+        (source) =>
+          !/wikipedia\.org|wikimedia\.org/i.test(source.url) &&
+          !/403|404|forbidden|not found|access denied/i.test(source.title)
       );
       const websiteCandidate =
         company.website && !/wikipedia\.org|wikimedia\.org/i.test(company.website)
@@ -152,6 +154,13 @@ export function filterVerifiedCompanies(
     .filter(
       (company) =>
         company.sources.length > 0 &&
+        Boolean(
+          company.product ||
+            company.targetCustomer ||
+            company.pricing ||
+            company.funding ||
+            company.engineeringOpenings
+        ) &&
         !/adempiere|ofbiz|gnucash|compiere|apache/i.test(company.name)
     );
 }

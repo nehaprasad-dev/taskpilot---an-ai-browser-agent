@@ -19,7 +19,15 @@ function isNavigationError(error: unknown): boolean {
 }
 
 export async function waitForStablePage(page: Page) {
-  await page.waitForLoadState("domcontentloaded", { timeout: 6000 }).catch(() => undefined);
+  await page.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => undefined);
+  const url = page.url();
+  const spa = /xero\.com|freshbooks\.com|waveapps\.com|wavehq\.com|zoho\.com|freeagent\.com/i.test(
+    url
+  );
+  await page.waitForTimeout(spa ? 1800 : 700).catch(() => undefined);
+  if (spa) {
+    await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => undefined);
+  }
 }
 
 async function readPageContent(page: Page) {
@@ -81,8 +89,15 @@ async function readPageContent(page: Page) {
       .filter((item): item is NonNullable<typeof item> => Boolean(item?.selector))
       .slice(0, 16);
 
+    const description =
+      document.querySelector('meta[name="description"]')?.getAttribute("content") ||
+      document
+        .querySelector('meta[property="og:description"]')
+        ?.getAttribute("content") ||
+      "";
+
     return {
-      excerpt: bodyText.slice(0, 5000),
+      excerpt: [description, bodyText].filter(Boolean).join(" ").slice(0, 5000),
       interactiveElements,
     };
   });

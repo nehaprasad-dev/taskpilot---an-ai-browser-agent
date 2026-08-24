@@ -3,7 +3,7 @@ services:
     name: researchpilot
     runtime: docker
     plan: starter
-    healthCheckPath: /
+    healthCheckPath: /api/health
     envVars:
       - key: GROQ_API_KEY
         sync: false

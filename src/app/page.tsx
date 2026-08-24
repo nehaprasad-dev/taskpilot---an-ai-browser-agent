@@ -14,9 +14,14 @@ import { useAgentSession } from "@/components/agent/useAgentSession";
 export default function HomePage() {
   const { state, start, control, reset, isLive } = useAgentSession();
   const showControlRoom = state.status !== "idle";
+  const showReport = state.status === "completed" && Boolean(state.result);
 
   return (
-    <div className={`app ${showControlRoom ? "app--live" : "app--landing"}`}>
+    <div
+      className={`app ${
+        showReport ? "app--report" : showControlRoom ? "app--live" : "app--landing"
+      }`}
+    >
       <header className="topbar">
         <div className="topbar__brand">
           <span className="topbar__mark" aria-hidden />
@@ -31,6 +36,19 @@ export default function HomePage() {
 
       {!showControlRoom ? (
         <AgentInput onStart={start} />
+      ) : showReport && state.result ? (
+        <main className="report">
+          <div className="report__topline">
+            <div>
+              <p className="eyebrow">Completed research</p>
+              <p className="report__goal">{state.goal}</p>
+            </div>
+            <button type="button" className="btn btn-primary" onClick={reset}>
+              New research
+            </button>
+          </div>
+          <ResearchTable result={state.result} />
+        </main>
       ) : (
         <main className="room">
           <section className="room__goal">
@@ -89,7 +107,7 @@ export default function HomePage() {
         </main>
       )}
 
-      {showControlRoom ? (
+      {showControlRoom && !showReport ? (
         <ControlBar
           status={state.status}
           isLive={isLive}

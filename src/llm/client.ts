@@ -302,78 +302,209 @@ export async function extractFromPage(input: {
   insights?: string;
 }> {
   const pageLooksEmpty =
-    /does not exist|if this persists|no results matching/i.test(
+    /does not exist|if this persists|no results matching|403|404|forbidden|access denied|verify you are a human/i.test(
       `${input.observation.title} ${input.observation.excerpt}`
     );
   if (pageLooksEmpty) {
     return { companies: [], insights: "This page has no extractable company facts." };
   }
 
-  const raw = await chatJson<z.infer<typeof extractSchema>>(
-    `Extract ONLY named companies or products that appear in the page text.
+  let insights: string | undefined;
+  let companies: CompanyResearch[] = [];
+
+  try {
+    const raw = await chatJson<z.infer<typeof extractSchema>>(
+      `This page is either an official company page or a discovery page.
+Extract ONLY the company that owns an official page, or named companies that explicitly appear on a discovery page.
 Do not extract the topic word "Accounting" or "Software" as a company.
 Do not copy Wikipedia chrome (Jump to content, Main menu, Search).
 Do not invent funding, jobs, or URLs.
+For an official page, use its title, URL host, and page copy together to identify the company.
+Capture a concise product description from the page even when there is no literal "product" heading.
+Pricing may be a price, plan, free trial, or explicit promotional offer.
+Target customer may be a directly stated audience such as small businesses, accountants, or freelancers.
 If this page is a general topic (Accounting, Bookkeeping, Sage 50) return { "companies": [] }.
 If a field is not on the page, omit it.
 sourceUrl must be exactly the page URL you were given.`,
-    `Goal: ${input.goal}
+      `Goal: ${input.goal}
 Instruction: ${input.instruction}
 URL: ${input.observation.url}
 Title: ${input.observation.title}
 Page text:
 ${input.observation.excerpt}`,
-    `{ "companies": [{ "name": "", "website": "", "product": "", "targetCustomer": "", "pricing": "", "funding": "", "engineeringOpenings": "", "notes": "" }], "insights": "" }`
-  );
+      `{ "companies": [{ "name": "", "website": "", "product": "", "targetCustomer": "", "pricing": "", "funding": "", "engineeringOpenings": "", "notes": "" }], "insights": "" }`
+    );
 
-  const parsed = extractSchema.parse(raw);
-  const excerpt = input.observation.excerpt.toLowerCase();
-  let companies: CompanyResearch[] = parsed.companies
-    .filter((c) => c.name && !isJunkCompanyName(c.name) && !isIncumbentVendor(c.name))
-    .map((c) => {
-      const chrome = /jump to content|main menu|create account|log in/i.test(
-        `${c.product || ""} ${c.notes || ""}`
-      );
-      const fundingOnPage =
-        Boolean(c.funding) &&
-        (excerpt.includes("$") ||
-          excerpt.includes("funding") ||
-          excerpt.includes("million") ||
-          excerpt.includes("series"));
-      const jobsOnPage =
-        Boolean(c.engineeringOpenings) &&
-        (excerpt.includes("engineer") ||
-          excerpt.includes("career") ||
-          excerpt.includes("hiring") ||
-          excerpt.includes("job"));
-      return {
-        name: c.name,
-        website: c.website || (!/wikipedia\.org|wikimedia\.org/i.test(input.observation.url)
-          ? input.observation.url
-          : undefined),
-        product: chrome ? undefined : c.product,
-        targetCustomer: c.targetCustomer,
-        pricing:
-          c.pricing && (excerpt.includes("$") || excerpt.includes("pricing") || excerpt.includes("plan"))
-            ? c.pricing
-            : undefined,
-        funding: fundingOnPage ? c.funding : undefined,
-        engineeringOpenings: jobsOnPage ? c.engineeringOpenings : undefined,
-        notes: c.notes,
-        sources: [
-          {
-            title: input.observation.title || "Source",
-            url: input.observation.url,
-          },
-        ],
-      };
-    });
+    const parsed = extractSchema.parse(raw);
+    insights = parsed.insights;
+    const excerpt = input.observation.excerpt.toLowerCase();
+    companies = parsed.companies
+      .filter((c) => c.name && !isJunkCompanyName(c.name) && !isIncumbentVendor(c.name))
+      .map((c) => {
+        const chrome = /jump to content|main menu|create account|log in/i.test(
+          `${c.product || ""} ${c.notes || ""}`
+        );
+        const fundingOnPage =
+          Boolean(c.funding) &&
+          (excerpt.includes("$") ||
+            excerpt.includes("funding") ||
+            excerpt.includes("million") ||
+            excerpt.includes("series"));
+        const jobsOnPage =
+          Boolean(c.engineeringOpenings) &&
+          (excerpt.includes("engineer") ||
+            excerpt.includes("career") ||
+            excerpt.includes("hiring") ||
+            excerpt.includes("job"));
+        return {
+          name: c.name,
+          website: c.website || (!/wikipedia\.org|wikimedia\.org/i.test(input.observation.url)
+            ? input.observation.url
+            : undefined),
+          product: chrome ? undefined : c.product,
+          targetCustomer: c.targetCustomer,
+          pricing:
+            c.pricing &&
+            (excerpt.includes("$") ||
+              excerpt.includes("£") ||
+              excerpt.includes("pricing") ||
+              excerpt.includes("plan") ||
+              excerpt.includes("free") ||
+              excerpt.includes("trial") ||
+              excerpt.includes("% off") ||
+              excerpt.includes("month"))
+              ? c.pricing
+              : undefined,
+          funding: fundingOnPage ? c.funding : undefined,
+          engineeringOpenings: jobsOnPage ? c.engineeringOpenings : undefined,
+          notes: c.notes,
+          sources: [
+            {
+              title: input.observation.title || "Source",
+              url: input.observation.url,
+            },
+          ],
+        };
+      });
+  } catch {
+    // Model JSON can fail; deterministic fallback still fills official pages.
+  }
 
   if (companies.length === 0) {
     companies = wikipediaTitleFallback(input.observation);
   }
 
-  return { insights: parsed.insights, companies };
+  // Always fill sparse/empty LLM rows from visible page text on official sites.
+  // Previously a name-only LLM row blocked the fallback and the final filter dropped everything.
+  if (!/wikipedia\.org|wikimedia\.org/i.test(input.observation.url)) {
+    companies = fillSparseFromOfficialPage(companies, input.observation);
+  }
+
+  return { insights, companies };
+}
+
+function fillSparseFromOfficialPage(
+  companies: CompanyResearch[],
+  observation: PageObservation
+): CompanyResearch[] {
+  const fallback = officialPageFallback(observation)[0];
+  if (!fallback) return companies;
+  if (companies.length === 0) return [fallback];
+  return companies.map((company) => ({
+    ...company,
+    website: company.website || fallback.website,
+    product: company.product || fallback.product,
+    targetCustomer: company.targetCustomer || fallback.targetCustomer,
+    pricing: company.pricing || fallback.pricing,
+    funding: company.funding || fallback.funding,
+    engineeringOpenings: company.engineeringOpenings || fallback.engineeringOpenings,
+    sources: [
+      ...(company.sources || []),
+      ...(fallback.sources || []).filter(
+        (source) => !(company.sources || []).some((existing) => existing.url === source.url)
+      ),
+    ],
+  }));
+}
+
+function officialPageFallback(observation: PageObservation): CompanyResearch[] {
+  const blob = `${observation.title} ${observation.excerpt}`.replace(/\s+/g, " ").trim();
+  if (
+    blob.length < 40 ||
+    /403|404|forbidden|not found|access denied|verify you are human/i.test(blob)
+  ) {
+    return [];
+  }
+
+  const host = (() => {
+    try {
+      return new URL(observation.url).hostname.replace(/^www\./, "");
+    } catch {
+      return "";
+    }
+  })();
+  const knownName =
+    host.match(/xero\.com$/i) ? "Xero" :
+    host.match(/freshbooks\.com$/i) ? "FreshBooks" :
+    host.match(/waveapps\.com$|wavehq\.com$/i) ? "Wave" :
+    host.match(/zoho\.com$/i) ? "Zoho Books" :
+    host.match(/freeagent\.com$/i) ? "FreeAgent" :
+    undefined;
+  const titleName = observation.title
+    .split(/\s+[|–—-]\s+/)[0]
+    ?.trim()
+    .slice(0, 60);
+  const name = knownName || titleName;
+  if (!name || isJunkCompanyName(name)) return [];
+
+  const sentences = blob
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length >= 28 && sentence.length <= 320);
+  const product =
+    sentences.find((sentence) =>
+      /account|bookkeep|invoice|payroll|expense|financial|billing|software|business/i.test(
+        sentence
+      )
+    ) ||
+    sentences[0] ||
+    blob.slice(0, 220);
+  const audienceMatches = blob.match(
+    /small businesses?|freelancers?|solopreneurs?|self-employed|sole traders?|accountants?|bookkeepers?|contractors?/gi
+  );
+  const price =
+    blob.match(/(?:\$|£|€)\s?\d+(?:[.,]\d+)?[^.!?]{0,55}/)?.[0] ||
+    blob.match(/\d+%\s+off[^.!?]{0,55}/i)?.[0] ||
+    blob.match(/free trial[^.!?]{0,55}/i)?.[0] ||
+    blob.match(/free plan[^.!?]{0,55}/i)?.[0];
+  const jobs =
+    blob.match(/\d+\s+(?:open\s+)?(?:engineering\s+)?(?:roles|jobs|openings|vacancies)/i)?.[0] ||
+    blob.match(/(?:engineering|software engineer)[^.!?]{0,70}(?:roles|jobs|openings|vacancies)/i)?.[0];
+  const funding =
+    blob.match(/(?:raised|funding|series [a-f])[^.!?]{0,90}(?:\$|£|€)\s?\d+[^.!?]{0,40}/i)?.[0];
+
+  const company: CompanyResearch = {
+    name,
+    website: observation.url,
+    product: product?.slice(0, 280),
+    targetCustomer: audienceMatches
+      ? [...new Set(audienceMatches.map((value) => value.toLowerCase()))]
+          .slice(0, 5)
+          .join(", ")
+      : undefined,
+    pricing: price?.slice(0, 120),
+    funding: funding?.slice(0, 140),
+    engineeringOpenings: jobs?.slice(0, 120),
+    sources: [{ title: observation.title || name, url: observation.url }],
+  };
+
+  return company.product ||
+    company.targetCustomer ||
+    company.pricing ||
+    company.funding ||
+    company.engineeringOpenings
+    ? [company]
+    : [];
 }
 
 function wikipediaTitleFallback(observation: PageObservation): CompanyResearch[] {
