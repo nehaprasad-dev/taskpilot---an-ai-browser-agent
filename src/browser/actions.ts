@@ -2,6 +2,7 @@ import type { Page } from "playwright";
 import type { AgentAction } from "@/agent/types";
 import { isBlockedUrl } from "@/browser/policy";
 import { searchUrl } from "@/browser/search";
+import { gotoPage } from "@/browser/navigate";
 
 function resolveSelector(selector: string): string {
   if (selector.startsWith("text=")) {
@@ -69,9 +70,10 @@ export async function openRelevantWikiResult(
     .catch(() => null);
 
   if (!href || SKIP_WIKI.test(href)) return null;
-  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 15000 });
+  const navigated = await gotoPage(page, href);
+  if (!navigated.ok) return { ok: false, detail: navigated.detail };
   await page.waitForTimeout(500);
-  return { ok: true, detail: `Opened Wikipedia result: ${href}` };
+  return { ok: true, detail: `Opened Wikipedia result: ${navigated.url}` };
 }
 
 export async function openFirstOrganicResult(
@@ -107,9 +109,10 @@ export async function openFirstOrganicResult(
     .catch(() => null);
 
   if (!href || SKIP_WIKI.test(href)) return null;
-  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 15000 });
+  const navigated = await gotoPage(page, href);
+  if (!navigated.ok) return { ok: false, detail: navigated.detail };
   await page.waitForTimeout(500);
-  return { ok: true, detail: `Opened search result: ${href}` };
+  return { ok: true, detail: `Opened search result: ${navigated.url}` };
 }
 
 export async function findOfficialWebsiteHref(page: Page): Promise<string | null> {
@@ -158,9 +161,10 @@ export async function openOfficialWebsite(
 ): Promise<{ ok: boolean; detail: string } | null> {
   const href = await findOfficialWebsiteHref(page);
   if (!href) return null;
-  await page.goto(href, { waitUntil: "domcontentloaded", timeout: 15000 });
+  const navigated = await gotoPage(page, href);
+  if (!navigated.ok) return { ok: false, detail: navigated.detail };
   await page.waitForTimeout(600);
-  return { ok: true, detail: `Opened official website: ${href}` };
+  return { ok: true, detail: `Opened official website: ${navigated.url}` };
 }
 
 export async function scrapeWikiCompanyNames(page: Page): Promise<string[]> {
@@ -227,8 +231,11 @@ export async function executeAction(
         }
         url = searchUrl(query || "AI accounting software", "wiki");
       }
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-      return { ok: true, detail: `Navigated to ${url}` };
+      const navigated = await gotoPage(page, url);
+      return {
+        ok: navigated.ok,
+        detail: navigated.detail,
+      };
     }
     case "click": {
       if (/official website/i.test(action.selector)) {

@@ -24,10 +24,8 @@ export async function waitForStablePage(page: Page) {
   const spa = /xero\.com|freshbooks\.com|waveapps\.com|wavehq\.com|zoho\.com|freeagent\.com/i.test(
     url
   );
-  await page.waitForTimeout(spa ? 1800 : 700).catch(() => undefined);
-  if (spa) {
-    await page.waitForLoadState("networkidle", { timeout: 4000 }).catch(() => undefined);
-  }
+  // Keep this short on production hosts — long networkidle waits look like a blank browser.
+  await page.waitForTimeout(spa ? 1200 : 500).catch(() => undefined);
 }
 
 async function readPageContent(page: Page) {

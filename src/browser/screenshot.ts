@@ -4,9 +4,9 @@ export async function captureScreenshot(page: Page): Promise<string> {
   try {
     const buffer = await page.screenshot({
       type: "jpeg",
-      quality: 40,
+      quality: 32,
       fullPage: false,
-      timeout: 4000,
+      timeout: 8000,
     });
     return `data:image/jpeg;base64,${buffer.toString("base64")}`;
   } catch {

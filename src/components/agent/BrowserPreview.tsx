@@ -66,8 +66,13 @@ export function BrowserPreview({ screenshot, url, title, excerpt }: Props) {
               <p>
                 {loadFailed
                   ? excerpt || "The browser could not load this page."
-                  : "The agent's viewport will appear here as it navigates."}
+                  : url && url !== "about:blank"
+                    ? `Connected to ${url.replace(/^https?:\/\//, "")}. Waiting for the next screenshot…`
+                    : "The agent's viewport will appear here as it navigates."}
               </p>
+              {excerpt && !loadFailed ? (
+                <p className="browser-empty__excerpt">{excerpt.slice(0, 220)}</p>
+              ) : null}
             </div>
           )}
           {blocked && url && screenshot ? (

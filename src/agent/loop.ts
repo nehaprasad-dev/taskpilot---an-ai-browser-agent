@@ -20,6 +20,7 @@ import {
   openRelevantWikiResult,
   scrapeWikiCompanyNames,
 } from "@/browser/actions";
+import { gotoPage } from "@/browser/navigate";
 import { observePage } from "@/browser/observer";
 import {
   isBrokenPage,
@@ -354,13 +355,30 @@ async function runAgent(session: SessionState) {
     },
   });
   try {
-    await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+    const navigated = await gotoPage(page, startUrl);
+    if (!navigated.ok) {
+      throw new Error(navigated.detail);
+    }
     session.pagesVisited += 1;
-    observation = await observePage(page);
-    emitObservation(session, observation);
+    // Always publish a viewport frame after the first navigation so production
+    // never sits on about:blank while the agent is already working.
+    try {
+      observation = await observePage(page);
+      emitObservation(session, observation);
+    } catch (observeError) {
+      const message =
+        observeError instanceof Error ? observeError.message : "Could not snapshot page";
+      emit(session, {
+        type: "page_observed",
+        url: navigated.url || startUrl,
+        title: "Page loading…",
+        screenshot: "",
+        excerpt: message,
+      });
+    }
     const keywords = topicKeywords(session.goal);
     if (
-      observation.url.includes("wikipedia.org") &&
+      observation?.url.includes("wikipedia.org") &&
       (isWikipediaSearchPage(observation) ||
         isMissingWikipediaArticle(observation) ||
         isBrokenPage(observation))
@@ -378,6 +396,10 @@ async function runAgent(session: SessionState) {
     if (observation) {
       await extractCurrentPage(session, observation, "Read the opening page for companies and facts");
     }
+    if (session.plan[0]) {
+      updatePlanStatus(session, (_s, i) => i === 0, "done");
+      if (session.plan[1]) updatePlanStatus(session, (_s, i) => i === 1, "active");
+    }
     emit(session, {
       type: "action_completed",
       action: {
@@ -385,7 +407,7 @@ async function runAgent(session: SessionState) {
         url: startUrl,
         explanation: "Official website opened",
       },
-      detail: `On ${observation?.url || startUrl}`,
+      detail: `On ${observation?.url || navigated.url || startUrl}`,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not open the official website";
@@ -822,7 +844,15 @@ async function runAgent(session: SessionState) {
       try {
         observation = await observePage(page);
       } catch {
-        session.memory.push(`Could not snapshot ${page.url()}: ${message}`);
+        const fallbackUrl = page.url() || previousUrl || "";
+        emit(session, {
+          type: "page_observed",
+          url: fallbackUrl,
+          title: "Page loading…",
+          screenshot: "",
+          excerpt: message,
+        });
+        session.memory.push(`Could not snapshot ${fallbackUrl}: ${message}`);
         continue;
       }
     }
