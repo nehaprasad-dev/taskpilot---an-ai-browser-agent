@@ -86,18 +86,59 @@ export function cloudAccountingLookups(goal: string): string[] {
   return ["Xero", "FreshBooks", "Wave", "Zoho Books", "FreeAgent"];
 }
 
+const OFFICIAL_SITES: Record<string, string> = {
+  xero: "https://www.xero.com",
+  xerolimited: "https://www.xero.com",
+  freshbooks: "https://www.freshbooks.com",
+  wave: "https://www.waveapps.com",
+  waveaccounting: "https://www.waveapps.com",
+  waveapps: "https://www.waveapps.com",
+  zohobooks: "https://www.zoho.com/books/",
+  zoho: "https://www.zoho.com/books/",
+  freeagent: "https://www.freeagent.com",
+};
+
+const WIKI_COMPANY_PAGES: Record<string, string> = {
+  xero: "https://en.wikipedia.org/wiki/Xero_(software)",
+  xerolimited: "https://en.wikipedia.org/wiki/Xero_(software)",
+  freshbooks: "https://en.wikipedia.org/wiki/FreshBooks",
+  wave: "https://en.wikipedia.org/wiki/Wave_Financial",
+  waveaccounting: "https://en.wikipedia.org/wiki/Wave_Financial",
+  waveapps: "https://en.wikipedia.org/wiki/Wave_Financial",
+  zohobooks: "https://en.wikipedia.org/wiki/Zoho_Corporation",
+  zoho: "https://en.wikipedia.org/wiki/Zoho_Corporation",
+  freeagent: "https://en.wikipedia.org/wiki/FreeAgent_(company)",
+};
+
 export function officialSiteForName(name: string): string | undefined {
   const compact = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const sites: Record<string, string> = {
-    xero: "https://www.xero.com",
-    xerolimited: "https://www.xero.com",
-    freshbooks: "https://www.freshbooks.com",
-    wave: "https://www.waveapps.com",
-    waveaccounting: "https://www.waveapps.com",
-    waveapps: "https://www.waveapps.com",
-    zohobooks: "https://www.zoho.com/books/",
-    zoho: "https://www.zoho.com/books/",
-    freeagent: "https://www.freeagent.com",
-  };
-  return sites[compact];
+  return OFFICIAL_SITES[compact];
+}
+
+/** Render cannot load heavy marketing homepages; Wikipedia articles are the reliable path. */
+export function browseUrlForName(name: string): string | undefined {
+  const compact = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (process.env.NODE_ENV === "production") {
+    return WIKI_COMPANY_PAGES[compact] || officialSiteForName(name);
+  }
+  return officialSiteForName(name);
+}
+
+export function isHeavyMarketingHost(url: string): boolean {
+  return /^(xero\.com|freshbooks\.com|waveapps\.com|zoho\.com|freeagent\.com)$/.test(
+    hostOf(url)
+  );
+}
+
+export function lighterUrlForOfficial(url: string): string {
+  if (process.env.NODE_ENV !== "production" || !isHeavyMarketingHost(url)) {
+    return url;
+  }
+  const host = hostOf(url);
+  if (host === "xero.com") return WIKI_COMPANY_PAGES.xero;
+  if (host === "freshbooks.com") return WIKI_COMPANY_PAGES.freshbooks;
+  if (host === "waveapps.com") return WIKI_COMPANY_PAGES.wave;
+  if (host === "zoho.com") return WIKI_COMPANY_PAGES.zohobooks;
+  if (host === "freeagent.com") return WIKI_COMPANY_PAGES.freeagent;
+  return url;
 }

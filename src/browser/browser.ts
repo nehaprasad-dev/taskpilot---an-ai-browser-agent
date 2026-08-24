@@ -37,8 +37,25 @@ export async function createSessionContext(): Promise<{
     userAgent:
       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
   });
-  const page = await context.newPage();
   const isProd = process.env.NODE_ENV === "production";
+  if (isProd) {
+    await context.route("**/*", (route) => {
+      const type = route.request().resourceType();
+      const url = route.request().url();
+      if (type === "media" || type === "font" || type === "websocket") {
+        return route.abort();
+      }
+      if (
+        /google-analytics|googletagmanager|hotjar|segment\.com|facebook\.net|doubleclick|optimizely|fullstory|sentry\.io|newrelic/i.test(
+          url
+        )
+      ) {
+        return route.abort();
+      }
+      return route.continue();
+    });
+  }
+  const page = await context.newPage();
   page.setDefaultTimeout(isProd ? 8000 : 10000);
   page.setDefaultNavigationTimeout(
     Number(process.env.NAV_TIMEOUT_MS || (isProd ? 12000 : 20000))

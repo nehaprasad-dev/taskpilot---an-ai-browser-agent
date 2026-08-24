@@ -134,6 +134,9 @@ export function filterVerifiedCompanies(
           !/wikipedia\.org|wikimedia\.org/i.test(source.url) &&
           !/403|404|forbidden|not found|access denied/i.test(source.title)
       );
+      const wikiOk = process.env.NODE_ENV === "production";
+      const keptSources =
+        officialSources.length > 0 ? officialSources : wikiOk ? sources : officialSources;
       const websiteCandidate =
         company.website && !/wikipedia\.org|wikimedia\.org/i.test(company.website)
           ? company.website.startsWith("http")
@@ -141,12 +144,13 @@ export function filterVerifiedCompanies(
             : `https://${company.website}`
           : officialSources[0]?.url;
       const website =
-        websiteCandidate && visitedHost(visitedUrls, websiteCandidate)
+        websiteCandidate &&
+        (wikiOk || visitedHost(visitedUrls, websiteCandidate))
           ? websiteCandidate
-          : officialSources[0]?.url;
+          : keptSources[0]?.url;
       return {
         ...company,
-        sources: officialSources,
+        sources: keptSources,
         website,
         product: isChromeText(company.product) ? undefined : company.product,
       };

@@ -43,6 +43,9 @@ import {
   isWikipediaListPage,
   cloudAccountingLookups,
   officialSiteForName,
+  browseUrlForName,
+  isHeavyMarketingHost,
+  lighterUrlForOfficial,
 } from "@/browser/policy";
 import { isNetworkFailure, networkFailureMessage } from "@/lib/errors";
 import {
@@ -339,12 +342,22 @@ async function runAgent(session: SessionState) {
   }
 
   let observation = null as Awaited<ReturnType<typeof observePage>> | null;
-  const startUrl = /account|bookkeep/i.test(session.goal)
-    ? officialSiteForName("Xero") || "https://www.xero.com"
-    : searchUrl(searchQueryFromGoal(session.goal), "wiki");
+  const isProd = process.env.NODE_ENV === "production";
+  const startUrl = isProd
+    ? "https://en.wikipedia.org/wiki/List_of_accounting_software"
+    : /account|bookkeep/i.test(session.goal)
+      ? officialSiteForName("Xero") || "https://www.xero.com"
+      : searchUrl(searchQueryFromGoal(session.goal), "wiki");
   emit(session, {
     type: "decision",
-    message: `Starting on an official company site: ${startUrl}`,
+    message: `Starting on ${isProd ? "Wikipedia (reliable on this host)" : "an official company site"}: ${startUrl}`,
+  });
+  emit(session, {
+    type: "page_observed",
+    url: startUrl,
+    title: "Opening page…",
+    screenshot: "",
+    excerpt: "Connecting the live browser. Wikipedia loads quickly on Render; marketing sites often time out.",
   });
   emit(session, {
     type: "action_started",
@@ -530,6 +543,7 @@ async function runAgent(session: SessionState) {
     });
 
     if (action.type === "navigate") {
+      action = { ...action, url: lighterUrlForOfficial(action.url) };
       // Render cannot load careers.* hosts reliably — skip them in production.
       if (
         process.env.NODE_ENV === "production" &&
@@ -997,10 +1011,10 @@ function nextUnvisitedOfficialUrl(
   currentUrl?: string
 ): string | undefined {
   for (const company of session.companies) {
-    const site = officialSiteForName(company.name);
+    const site = browseUrlForName(company.name);
     if (!site || session.skippedNames.includes(company.name.toLowerCase())) continue;
-    if (sameCompanyHost(site, currentUrl || "")) continue;
-    if (!hasVisitedPage(session, site)) return site;
+    if (hasVisitedPage(session, site)) continue;
+    return site;
   }
   return undefined;
 }
@@ -1012,7 +1026,11 @@ function bindExtractToHost(
 ): CompanyResearch[] {
   const seed = session.companies.find((company) => {
     const site = officialSiteForName(company.name);
-    return Boolean(site && sameCompanyHost(site, observation.url));
+    const wiki = browseUrlForName(company.name);
+    return Boolean(
+      (site && sameCompanyHost(site, observation.url)) ||
+        (wiki && normalizePageUrl(wiki) === normalizePageUrl(observation.url))
+    );
   });
   if (!seed) return companies;
   if (/403|404|forbidden|not found|access denied/i.test(observation.title)) {
@@ -1082,6 +1100,9 @@ function nextUnverifiedName(session: SessionState): string | undefined {
     const onOfficial =
       Boolean(c.website && !isWikiUrl(c.website) && (!site || sameCompanyHost(c.website, site)));
     const hasFacts = Boolean(c.product || c.pricing || c.targetCustomer);
+    if (process.env.NODE_ENV === "production") {
+      return !hasFacts;
+    }
     return !onOfficial || !hasFacts;
   })?.name;
 }
@@ -1090,21 +1111,17 @@ function nextOfficialUrl(session: SessionState, currentUrl?: string): string | u
   const unvisited = nextUnvisitedOfficialUrl(session, currentUrl);
   if (unvisited) return unvisited;
   const pending = nextUnverifiedName(session);
-  const pendingSite = pending ? officialSiteForName(pending) : undefined;
-  if (
-    pendingSite &&
-    !sameCompanyHost(pendingSite, currentUrl || "") &&
-    !hasVisitedPage(session, pendingSite)
-  ) {
+  const pendingSite = pending ? browseUrlForName(pending) : undefined;
+  if (pendingSite && !hasVisitedPage(session, pendingSite)) {
     return pendingSite;
   }
   for (const company of session.companies) {
-    const site = officialSiteForName(company.name);
+    const site = browseUrlForName(company.name);
     if (!site) continue;
     if (session.skippedNames.includes(company.name.toLowerCase())) continue;
-    if (sameCompanyHost(site, currentUrl || "")) continue;
+    if (hasVisitedPage(session, site)) continue;
     const hasFacts = Boolean(company.product || company.pricing || company.targetCustomer);
-    if (!hasFacts && !hasVisitedPage(session, site)) return site;
+    if (!hasFacts) return site;
   }
   return undefined;
 }
@@ -1125,17 +1142,17 @@ async function pickFastAction(
 ): Promise<AgentAction | null> {
   if (!observation) {
     const first = nextUnverifiedName(session);
-    const firstSite = first ? officialSiteForName(first) : undefined;
+    const firstSite = first ? browseUrlForName(first) : undefined;
     return {
       type: "navigate",
       url: firstSite || nextWikiSearch(session),
       explanation: firstSite
-        ? `Open ${first}'s official website`
+        ? `Open ${first}'s research page`
         : "Open Wikipedia search for the goal",
     };
   }
   const pending = nextUnverifiedName(session);
-  const pendingSite = pending ? officialSiteForName(pending) : undefined;
+  const pendingSite = pending ? browseUrlForName(pending) : undefined;
   const deadCompanyPage =
     (isDeadPage(observation) || isBrokenPage(observation)) && !isWikiUrl(observation.url);
   if (
@@ -1159,7 +1176,7 @@ async function pickFastAction(
       return {
         type: "navigate",
         url: pendingSite,
-        explanation: `Open ${pending}'s official website`,
+        explanation: `Open ${pending}'s research page`,
       };
     }
     return {
@@ -1172,7 +1189,7 @@ async function pickFastAction(
     return {
       type: "navigate",
       url: pendingSite,
-      explanation: `Open ${pending}'s official website`,
+      explanation: `Open ${pending}'s research page`,
     };
   }
   if (
@@ -1188,20 +1205,33 @@ async function pickFastAction(
         explanation: `Skipped ${articleName}. Opening the next official website.`,
       };
     }
-    const mapped = officialSiteForName(articleName) || pendingSite;
+    const mapped = browseUrlForName(articleName) || pendingSite;
     if (
       session.extractedUrls.includes(observation.url) &&
       !session.officialOpened.includes(observation.url)
     ) {
       const href = session.page ? await findOfficialWebsiteHref(session.page) : null;
       const target =
-        (href && !isIncumbentHost(href) && !isBlockedUrl(href) && href) || mapped;
+        (href &&
+          !isIncumbentHost(href) &&
+          !isBlockedUrl(href) &&
+          !isHeavyMarketingHost(href) &&
+          href) ||
+        mapped;
       session.officialOpened.push(observation.url);
-      if (target) {
+      if (target && !isHeavyMarketingHost(target) && target !== observation.url) {
         return {
           type: "navigate",
-          url: target,
-          explanation: `Open the official website: ${target}`,
+          url: lighterUrlForOfficial(target),
+          explanation: `Open the next page: ${target}`,
+        };
+      }
+      const next = nextUnvisitedOfficialUrl(session, observation.url) || pendingSite;
+      if (next && next !== observation.url) {
+        return {
+          type: "navigate",
+          url: next,
+          explanation: `Next company page: ${next}`,
         };
       }
       skipCompany(session, articleName);
@@ -1221,11 +1251,9 @@ async function pickFastAction(
     const isProd = process.env.NODE_ENV === "production";
     const origin = originOf(observation.url);
 
-    if (origin) {
+    if (origin && !isProd) {
       const pricing = `${origin}/pricing`;
       const careers = `${origin}/careers`;
-
-      // Production: at most one pricing hop, never careers.* (those hosts are very slow on Render).
       if (
         needsPricing &&
         !session.probedOrigins.includes(pricing) &&
@@ -1238,29 +1266,27 @@ async function pickFastAction(
           explanation: "Open pricing on the official site",
         };
       }
-
-      if (!isProd) {
-        if (
-          !session.probedOrigins.includes(careers) &&
-          !hasVisitedPage(session, careers)
-        ) {
-          session.probedOrigins.push(careers);
-          return {
-            type: "navigate",
-            url: careers,
-            explanation: "Open careers on the official site",
-          };
-        }
-      } else if (!session.probedOrigins.includes(careers)) {
+      if (
+        !session.probedOrigins.includes(careers) &&
+        !hasVisitedPage(session, careers)
+      ) {
         session.probedOrigins.push(careers);
+        return {
+          type: "navigate",
+          url: careers,
+          explanation: "Open careers on the official site",
+        };
       }
     }
   }
-  if (pendingSite && !sameCompanyHost(observation.url, pendingSite)) {
+  if (
+    pendingSite &&
+    normalizePageUrl(observation.url) !== normalizePageUrl(pendingSite)
+  ) {
     return {
       type: "navigate",
       url: pendingSite,
-      explanation: `Open ${pending}'s official website`,
+      explanation: `Open ${pending}'s research page`,
     };
   }
   const usable = companiesWithOfficialSites(session).filter(
@@ -1319,15 +1345,21 @@ async function extractCurrentPage(
           )
           .map((name) => ({
             name,
+            website: officialSiteForName(name),
             sources: [{ title: observation.title, url: observation.url }],
           }));
         session.companies = mergeCompanies(session.companies, fromWiki);
       } catch {
         // keep seeded lookups
       }
+      session.extractedUrls.push(observation.url);
+      return;
     }
-    session.extractedUrls.push(observation.url);
-    return;
+    if (isWikipediaSearchPage(observation)) {
+      session.extractedUrls.push(observation.url);
+      return;
+    }
+    // Company Wikipedia articles: extract facts here (production cannot load marketing sites).
   }
 
   try {
