@@ -1318,6 +1318,13 @@ function emitObservation(
     screenshot: observation.screenshot,
     excerpt: observation.excerpt.slice(0, 500),
   });
+  if (!observation.screenshot) {
+    emit(session, {
+      type: "decision",
+      message:
+        "Page text was captured, but the live screenshot failed on this host. Continuing research from the page content.",
+    });
+  }
 }
 
 function maybeAdvancePlan(session: SessionState, activeStep: number) {

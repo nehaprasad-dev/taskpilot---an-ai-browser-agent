@@ -110,7 +110,11 @@ export async function observePage(page: Page): Promise<PageObservation> {
       const url = page.url();
       const title = await page.title().catch(() => "");
       const { excerpt, interactiveElements } = await readPageContent(page);
-      const screenshot = await captureScreenshot(page);
+      let screenshot = await captureScreenshot(page);
+      if (!screenshot) {
+        await page.waitForTimeout(400).catch(() => undefined);
+        screenshot = await captureScreenshot(page);
+      }
 
       return {
         url,

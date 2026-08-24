@@ -11,8 +11,12 @@ export async function getBrowser(): Promise<Browser> {
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
         "--disable-dev-shm-usage",
-        "--disable-gpu",
+        // Soft software rendering — more reliable screenshots on small VMs
+        // than --disable-gpu alone, which often yields empty captures.
+        "--use-gl=angle",
+        "--use-angle=swiftshader",
         "--disable-http2",
+        "--font-render-hinting=none",
       ],
     });
   }
@@ -25,10 +29,13 @@ export async function createSessionContext(): Promise<{
 }> {
   const browser = await getBrowser();
   const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
+    // Smaller than local desktop — keeps Render memory + SSE payloads lighter.
+    viewport: { width: 1024, height: 640 },
+    deviceScaleFactor: 1,
     ignoreHTTPSErrors: true,
+    javaScriptEnabled: true,
     userAgent:
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
   });
   const page = await context.newPage();
   page.setDefaultTimeout(10000);
