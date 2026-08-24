@@ -1,11 +1,13 @@
 import type { Page } from "playwright";
 
-const NAV_TIMEOUT_MS = Number(process.env.NAV_TIMEOUT_MS || 30000);
+const isProd = process.env.NODE_ENV === "production";
+const NAV_TIMEOUT_MS = Number(
+  process.env.NAV_TIMEOUT_MS || (isProd ? 12000 : 20000)
+);
 
 /**
- * Navigate with production-friendly timeouts.
- * On Render, corporate sites are often slow; prefer a committed navigation
- * over waiting forever for a perfect domcontentloaded.
+ * Fast navigation for constrained hosts (Render).
+ * Prefer `commit` so we do not burn 30s waiting for heavy marketing pages.
  */
 export async function gotoPage(
   page: Page,
@@ -13,31 +15,44 @@ export async function gotoPage(
 ): Promise<{ ok: boolean; detail: string; url: string }> {
   try {
     await page.goto(url, {
-      waitUntil: "domcontentloaded",
+      waitUntil: "commit",
       timeout: NAV_TIMEOUT_MS,
     });
-    return { ok: true, detail: `Navigated to ${url}`, url: page.url() || url };
+    await page
+      .waitForLoadState("domcontentloaded", {
+        timeout: isProd ? 4000 : 8000,
+      })
+      .catch(() => undefined);
+    return { ok: true, detail: `Navigated to ${page.url() || url}`, url: page.url() || url };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const current = page.url();
-    // If Chromium did reach a real page before the wait timed out, keep going.
-    if (current && current !== "about:blank" && !current.startsWith("chrome-error://")) {
+    const heavyHost =
+      /careers\.|jobs\.|greenhouse\.io|lever\.co|workday/i.test(url) ||
+      /careers\.|jobs\./i.test(current || "");
+
+    // Partial load on a heavy careers host is usually worse than skipping —
+    // production VMs burn 12–30s here and still fail screenshots.
+    if (
+      heavyHost &&
+      isProd &&
+      current &&
+      current !== "about:blank" &&
+      !current.startsWith("chrome-error://")
+    ) {
       return {
-        ok: true,
-        detail: `Loaded ${current} after a slow navigation (${message.split("\n")[0]})`,
+        ok: false,
+        detail: `Timeout on slow careers page: ${current}`,
         url: current,
       };
     }
 
-    try {
-      await page.goto(url, { waitUntil: "commit", timeout: Math.min(NAV_TIMEOUT_MS, 20000) });
-      const after = page.url() || url;
-      if (after && after !== "about:blank") {
-        await page.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => undefined);
-        return { ok: true, detail: `Navigated to ${after}`, url: after };
-      }
-    } catch {
-      // fall through
+    if (current && current !== "about:blank" && !current.startsWith("chrome-error://")) {
+      return {
+        ok: true,
+        detail: `Loaded ${current} (slow page)`,
+        url: current,
+      };
     }
 
     return {

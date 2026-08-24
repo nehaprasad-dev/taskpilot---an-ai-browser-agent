@@ -4,6 +4,9 @@ import { isBlockedUrl } from "@/browser/policy";
 import { searchUrl } from "@/browser/search";
 import { gotoPage } from "@/browser/navigate";
 
+const isProd = process.env.NODE_ENV === "production";
+const SETTLE_MS = isProd ? 180 : 500;
+
 function resolveSelector(selector: string): string {
   if (selector.startsWith("text=")) {
     const text = selector.slice(5).replace(/^["']|["']$/g, "");
@@ -72,7 +75,7 @@ export async function openRelevantWikiResult(
   if (!href || SKIP_WIKI.test(href)) return null;
   const navigated = await gotoPage(page, href);
   if (!navigated.ok) return { ok: false, detail: navigated.detail };
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(SETTLE_MS);
   return { ok: true, detail: `Opened Wikipedia result: ${navigated.url}` };
 }
 
@@ -111,7 +114,7 @@ export async function openFirstOrganicResult(
   if (!href || SKIP_WIKI.test(href)) return null;
   const navigated = await gotoPage(page, href);
   if (!navigated.ok) return { ok: false, detail: navigated.detail };
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(SETTLE_MS);
   return { ok: true, detail: `Opened search result: ${navigated.url}` };
 }
 
@@ -163,7 +166,7 @@ export async function openOfficialWebsite(
   if (!href) return null;
   const navigated = await gotoPage(page, href);
   if (!navigated.ok) return { ok: false, detail: navigated.detail };
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(SETTLE_MS);
   return { ok: true, detail: `Opened official website: ${navigated.url}` };
 }
 
@@ -206,7 +209,7 @@ async function fillField(
     await page.keyboard.press("Enter");
     await page.waitForLoadState("domcontentloaded").catch(() => undefined);
   }
-  await page.waitForTimeout(700);
+  await page.waitForTimeout(SETTLE_MS);
   return {
     ok: true,
     detail: pressEnter
@@ -271,11 +274,11 @@ export async function executeAction(
     }
     case "scroll": {
       await page.mouse.wheel(0, action.direction === "down" ? 900 : -900);
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(SETTLE_MS);
       return { ok: true, detail: `Scrolled ${action.direction}` };
     }
     case "wait": {
-      await page.waitForTimeout(Math.min(action.ms, 5000));
+      await page.waitForTimeout(Math.min(action.ms, isProd ? 1200 : 5000));
       return { ok: true, detail: `Waited ${action.ms}ms` };
     }
     case "extract":

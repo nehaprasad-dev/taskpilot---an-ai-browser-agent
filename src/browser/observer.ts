@@ -19,13 +19,11 @@ function isNavigationError(error: unknown): boolean {
 }
 
 export async function waitForStablePage(page: Page) {
-  await page.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => undefined);
-  const url = page.url();
-  const spa = /xero\.com|freshbooks\.com|waveapps\.com|wavehq\.com|zoho\.com|freeagent\.com/i.test(
-    url
-  );
-  // Keep this short on production hosts — long networkidle waits look like a blank browser.
-  await page.waitForTimeout(spa ? 1200 : 500).catch(() => undefined);
+  const isProd = process.env.NODE_ENV === "production";
+  await page
+    .waitForLoadState("domcontentloaded", { timeout: isProd ? 3000 : 8000 })
+    .catch(() => undefined);
+  await page.waitForTimeout(isProd ? 250 : 600).catch(() => undefined);
 }
 
 async function readPageContent(page: Page) {

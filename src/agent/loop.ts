@@ -530,6 +530,32 @@ async function runAgent(session: SessionState) {
     });
 
     if (action.type === "navigate") {
+      // Render cannot load careers.* hosts reliably — skip them in production.
+      if (
+        process.env.NODE_ENV === "production" &&
+        /careers\.|\/careers|greenhouse\.io|lever\.co|workday/i.test(action.url)
+      ) {
+        session.probedOrigins.push(action.url);
+        const alternative = nextUnvisitedOfficialUrl(session, observation?.url);
+        if (alternative) {
+          emit(session, {
+            type: "decision",
+            message: `Skipped slow careers page; opening ${alternative}`,
+          });
+          action = {
+            type: "navigate",
+            url: alternative,
+            explanation: "Skip careers host — open next official company site",
+          };
+        } else {
+          emit(session, {
+            type: "decision",
+            message: "Skipped a slow careers page and continued research.",
+          });
+          continue;
+        }
+      }
+
       const target = normalizePageUrl(action.url);
       if (target === session.lastNavigationTarget) {
         session.repeatedNavigationCount += 1;
@@ -767,6 +793,33 @@ async function runAgent(session: SessionState) {
         await finish(session, networkFailureMessage(executed.detail));
         return;
       }
+
+      // Timed-out navigations should not open the recovery modal — that is why
+      // production demos feel stuck compared to local. In production, skip any
+      // failed navigate and keep moving to the next company page.
+      const timedOutNav =
+        action.type === "navigate" && /timeout/i.test(executed.detail);
+      const skipSlowNav =
+        timedOutNav ||
+        (process.env.NODE_ENV === "production" && action.type === "navigate");
+      if (skipSlowNav) {
+        session.retries += 1;
+        if (action.type === "navigate") {
+          session.probedOrigins.push(action.url);
+        }
+        emit(session, {
+          type: "retry",
+          attempt: session.retries,
+          reason: executed.detail.split("Call log")[0]?.trim().slice(0, 180) || executed.detail,
+          strategy: "Skipped the slow page and continued",
+        });
+        emit(session, {
+          type: "decision",
+          message: "Skipped a slow page so the research can keep moving.",
+        });
+        continue;
+      }
+
       emit(session, {
         type: "retry",
         attempt: session.retries + 1,
@@ -1160,11 +1213,21 @@ async function pickFastAction(
     }
   }
   if (!isWikiUrl(observation.url) && session.extractedUrls.includes(observation.url)) {
+    const currentCompany = session.companies.find((company) => {
+      const site = officialSiteForName(company.name);
+      return Boolean(site && sameCompanyHost(site, observation.url));
+    });
+    const needsPricing = Boolean(currentCompany && !currentCompany.pricing);
+    const isProd = process.env.NODE_ENV === "production";
     const origin = originOf(observation.url);
+
     if (origin) {
       const pricing = `${origin}/pricing`;
       const careers = `${origin}/careers`;
+
+      // Production: at most one pricing hop, never careers.* (those hosts are very slow on Render).
       if (
+        needsPricing &&
         !session.probedOrigins.includes(pricing) &&
         !hasVisitedPage(session, pricing)
       ) {
@@ -1175,16 +1238,21 @@ async function pickFastAction(
           explanation: "Open pricing on the official site",
         };
       }
-      if (
-        !session.probedOrigins.includes(careers) &&
-        !hasVisitedPage(session, careers)
-      ) {
+
+      if (!isProd) {
+        if (
+          !session.probedOrigins.includes(careers) &&
+          !hasVisitedPage(session, careers)
+        ) {
+          session.probedOrigins.push(careers);
+          return {
+            type: "navigate",
+            url: careers,
+            explanation: "Open careers on the official site",
+          };
+        }
+      } else if (!session.probedOrigins.includes(careers)) {
         session.probedOrigins.push(careers);
-        return {
-          type: "navigate",
-          url: careers,
-          explanation: "Open careers on the official site",
-        };
       }
     }
   }
@@ -1337,8 +1405,12 @@ async function executeWithRecovery(
   page: Page,
   action: Parameters<typeof executeAction>[1]
 ) {
+  const isProd = process.env.NODE_ENV === "production";
+  // Production: one shot for navigations — retries double the Render wait time.
+  const maxAttempts =
+    isProd && action.type === "navigate" ? 1 : MAX_RETRIES;
   let lastDetail = "";
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const result = await executeAction(page, action);
       if (!result.ok && action.type === "click") {
@@ -1359,15 +1431,15 @@ async function executeWithRecovery(
           .split(/\s+/)
           .filter(Boolean)
           .slice(0, 3);
-        const alt = await findAlternativeClickTarget(page, [
-          ...keywords,
-          "pricing",
-          "plans",
-          "careers",
-          "jobs",
-          "about",
-        ]);
-        if (alt && !/accessibility|feedback|cookie/i.test(alt)) {
+        const altKeywords = isProd
+          ? [...keywords, "pricing", "plans", "about"]
+          : [...keywords, "pricing", "plans", "careers", "jobs", "about"];
+        const alt = await findAlternativeClickTarget(page, altKeywords);
+        if (
+          alt &&
+          !/accessibility|feedback|cookie/i.test(alt) &&
+          !(isProd && /career|job/i.test(alt))
+        ) {
           strategy = `Trying alternative selector: ${alt}`;
           action = { ...action, selector: alt };
         }
@@ -1382,7 +1454,7 @@ async function executeWithRecovery(
         }
       } else if (action.type === "navigate" && attempt >= 2) {
         strategy = "Waiting and retrying navigation";
-        await page.waitForTimeout(1200);
+        await page.waitForTimeout(isProd ? 400 : 1200);
       } else if (attempt === 3) {
         strategy = "Scrolling and retrying";
         await page.mouse.wheel(0, 600);
